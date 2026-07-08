@@ -52,6 +52,7 @@ export function readZip(bytes) {
     if (u32(view, offset) !== 0x02014b50) throw new Error('Répertoire ZIP corrompu.');
     const method = u16(view, offset + 10);
     const compSize = u32(view, offset + 20);
+    const uncompSize = u32(view, offset + 24);
     const nameLen = u16(view, offset + 28);
     const extraLen = u16(view, offset + 30);
     const commentLen = u16(view, offset + 32);
@@ -62,7 +63,7 @@ export function readZip(bytes) {
     const localNameLen = u16(localView, 26);
     const localExtraLen = u16(localView, 28);
     const dataStart = localOffset + 30 + localNameLen + localExtraLen;
-    entries.set(name, { method, raw: bytes.subarray(dataStart, dataStart + compSize) });
+    entries.set(name, { method, uncompSize, raw: bytes.subarray(dataStart, dataStart + compSize) });
 
     offset += 46 + nameLen + extraLen + commentLen;
   }
@@ -136,11 +137,15 @@ export async function parsePak(file) {
     const match = name.match(/\/sounds\/(\d{3})\s+(.*)\.wav$/i);
     if (!match) continue;
     const slot = parseInt(match[1], 10);
+    const size = entry.uncompSize || entry.raw.length;
     const sound = {
       slot,
       name: match[2],
       bank: bankKeyForSlot(slot),
       compressedSize: entry.raw.length,
+      size, // taille réelle du WAV (octets), telle qu'occupée en mémoire
+      // durée approx. : PCM mono 16 bits @ 46875 Hz, en-tête WAV ~44 octets
+      duration: Math.max(0, size - 44) / (46875 * 2),
       async getBlob() {
         if (!blobCache.has(slot)) {
           const data = await readZipEntry(entry);

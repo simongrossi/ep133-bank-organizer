@@ -36,7 +36,7 @@ const el = Object.fromEntries([
   'exportJsonBtn', 'exportPackBtn', 'exportHandoffBtn', 'uploadBtn', 'logOutput', 'clearLogBtn',
   'testDeviceBtn', 'deviceInfo', 'midiActivity', 'midiActivityText',
   'memoryCapacity', 'memoryBarFill', 'memoryStats', 'memoryBanks',
-  'pakInput', 'deviceEmpty', 'deviceContent', 'deviceSummary', 'projectSelect',
+  'pakInput', 'deviceEmpty', 'deviceContent', 'deviceSummary', 'deviceBarFill', 'deviceBanks', 'projectSelect',
   'projectPads', 'deviceSearch', 'deviceSounds', 'midiChannel', 'livePads', 'liveStatus',
   'confirmDialog', 'confirmTitle', 'confirmMessage'
 ].map(id => [id, document.getElementById(id)]));
@@ -267,16 +267,24 @@ function renderMemory() {
   const capacity = EP133_MEMORY_OPTIONS.find(option => option.key === state.memoryKey) ?? EP133_MEMORY_OPTIONS[0];
   const summary = summarizeMemory(state.samples, { capacityBytes: capacity.bytes, conversion: currentConversion() });
 
-  el.memoryBarFill.style.width = `${Math.round(summary.usedRatio * 100)}%`;
-  el.memoryBarFill.classList.toggle('is-over', summary.overCapacity);
+  // Si une sauvegarde .pak est chargée, on part de l'occupation réelle de
+  // l'appareil : le plan d'import s'ajoute par-dessus.
+  const deviceBytes = state.device ? state.device.sounds.reduce((sum, sound) => sum + sound.size, 0) : 0;
+  const combined = deviceBytes + summary.totalBytes;
+  const usedRatio = capacity.bytes > 0 ? Math.min(1, combined / capacity.bytes) : 0;
+  const over = combined > capacity.bytes;
 
-  const percent = (summary.usedRatio * 100).toFixed(summary.usedRatio >= 0.1 ? 0 : 1);
+  el.memoryBarFill.style.width = `${Math.round(usedRatio * 100)}%`;
+  el.memoryBarFill.classList.toggle('is-over', over);
+
+  const percent = (usedRatio * 100).toFixed(usedRatio >= 0.1 ? 0 : 1);
   el.memoryStats.innerHTML = [
-    `<span><b>${formatBytes(summary.totalBytes)}</b> / ${formatBytes(summary.capacityBytes)} <small class="${summary.overCapacity ? 'stat-over' : 'muted'}">(${percent}%${summary.overCapacity ? ' — dépassement !' : ''})</small></span>`,
-    `<span><b>${summary.count}</b> sample(s)</span>`,
-    `<span><b>${formatBytes(summary.freeBytes)}</b> libre(s)</span>`,
-    `<span>≈ <b>${formatDuration(summary.totalDuration)}</b> d’audio</span>`
-  ].join('');
+    `<span><b>${formatBytes(combined)}</b> / ${formatBytes(capacity.bytes)} <small class="${over ? 'stat-over' : 'muted'}">(${percent}%${over ? ' — dépassement !' : ''})</small></span>`,
+    deviceBytes ? `<span><b>${formatBytes(deviceBytes)}</b> déjà sur l’appareil</span>` : '',
+    `<span><b>${summary.count}</b> sample(s) à importer (${formatBytes(summary.totalBytes)})</span>`,
+    `<span><b>${formatBytes(Math.max(0, capacity.bytes - combined))}</b> resteront libres</span>`,
+    `<span>≈ <b>${formatDuration(summary.totalDuration)}</b> d’audio à importer</span>`
+  ].filter(Boolean).join('');
 
   const maxBank = Math.max(1, ...summary.perBank.map(bank => bank.bytes));
   el.memoryBanks.innerHTML = summary.perBank.map(bank => `
@@ -459,6 +467,7 @@ async function importPak(file) {
     state.deviceSearch = '';
     el.deviceSearch.value = '';
     renderDevice();
+    renderMemory();
     log(`Sauvegarde chargée : ${device.sounds.length} son(s), ${device.projects.length} projet(s).`);
   } catch (error) {
     log(`Import .pak impossible : ${error.message}`, 'error');
@@ -469,14 +478,46 @@ function renderDevice() {
   const device = state.device;
   el.deviceEmpty.hidden = Boolean(device);
   el.deviceContent.hidden = !device;
-  if (!device) return;
+  if (!device) {
+    const midiReady = Boolean(state.midi.access);
+    el.deviceEmpty.classList.toggle('is-midi-connected', midiReady);
+    el.deviceEmpty.innerHTML = midiReady
+      ? `<p><strong>MIDI connecté, stats appareil incomplètes.</strong></p>
+        <p>Le MIDI standard ne donne pas la liste des sons ni l’occupation mémoire. Importe une sauvegarde <code>.pak</code> exportée depuis l’EP Sample Tool officiel pour compléter les stats.</p>`
+      : '<p>Aucune sauvegarde chargée. Exporte un backup depuis l’EP Sample Tool officiel, puis importe le fichier <code>.pak</code> ici.</p>';
+    return;
+  }
+  el.deviceEmpty.classList.remove('is-midi-connected');
 
-  const totalBytes = device.sounds.reduce((sum, sound) => sum + sound.compressedSize, 0);
+  const capacity = (EP133_MEMORY_OPTIONS.find(option => option.key === state.memoryKey) ?? EP133_MEMORY_OPTIONS[0]).bytes;
+  const totalBytes = device.sounds.reduce((sum, sound) => sum + sound.size, 0);
+  const totalDuration = device.sounds.reduce((sum, sound) => sum + sound.duration, 0);
+  const usedRatio = capacity > 0 ? Math.min(1, totalBytes / capacity) : 0;
+  const percent = (usedRatio * 100).toFixed(usedRatio >= 0.1 ? 0 : 1);
+
   el.deviceSummary.innerHTML = [
-    `<span><b>${device.sounds.length}</b> son(s) en mémoire</span>`,
-    `<span><b>${device.projects.length}</b> projet(s)</span>`,
-    `<span>≈ <b>${formatBytes(totalBytes)}</b> compressés</span>`
+    `<span><b>${device.sounds.length}</b> son(s) · <b>${device.projects.length}</b> projet(s)</span>`,
+    `<span><b>${formatBytes(totalBytes)}</b> / ${formatBytes(capacity)} <small class="${totalBytes > capacity ? 'stat-over' : 'muted'}">(${percent}%)</small></span>`,
+    `<span><b>${formatBytes(Math.max(0, capacity - totalBytes))}</b> restants</span>`,
+    `<span>≈ <b>${formatDuration(totalDuration)}</b> d’audio</span>`
   ].join('');
+  el.deviceBarFill.style.width = `${Math.round(usedRatio * 100)}%`;
+  el.deviceBarFill.classList.toggle('is-over', totalBytes > capacity);
+
+  // Répartition par banque (taille réelle occupée sur l'appareil)
+  const perBank = new Map(BANKS.map(bank => [bank.key, { label: bank.label, bytes: 0, count: 0 }]));
+  for (const sound of device.sounds) {
+    const bank = perBank.get(sound.bank);
+    if (bank) { bank.bytes += sound.size; bank.count += 1; }
+  }
+  const maxBank = Math.max(1, ...[...perBank.values()].map(bank => bank.bytes));
+  el.deviceBanks.innerHTML = [...perBank.values()].map(bank => `
+    <div class="mem-bank ${bank.count ? '' : 'is-empty'}">
+      <div class="mem-bank-label">${bank.label}</div>
+      <div class="mem-bank-size">${bank.count} · ${formatBytes(bank.bytes)}</div>
+      <div class="bank-progress"><span style="width:${Math.round((bank.bytes / maxBank) * 100)}%"></span></div>
+    </div>
+  `).join('');
 
   el.projectSelect.innerHTML = device.projects
     .map(project => `<option value="${project.id}" ${project.id === state.deviceProject ? 'selected' : ''}>${project.id} · ${project.assignedCount} pad(s)</option>`)
@@ -506,7 +547,7 @@ function renderProjectPads() {
       if (!sound) {
         return `<div class="dpad is-missing" ${noteAttr} title="Slot ${pad.slot} absent de la sauvegarde · note ${note}">${fn}<span class="dpad-slot">${String(pad.slot).padStart(3, '0')}</span><span class="dpad-name">(son absent)</span></div>`;
       }
-      return `<button class="dpad is-filled${playing}" data-slot="${sound.slot}" ${noteAttr} title="${escapeHtml(`Pad ${PAD_LABELS[offset]} · ${String(sound.slot).padStart(3, '0')} · ${sound.name} — cliquer pour écouter`)}">
+      return `<button class="dpad is-filled${playing}" data-slot="${sound.slot}" ${noteAttr} title="${escapeHtml(`Pad ${PAD_LABELS[offset]} · ${String(sound.slot).padStart(3, '0')} · ${sound.name} · ${formatBytes(sound.size)} (${sound.duration.toFixed(2)} s) — cliquer pour écouter`)}">
         ${fn}<span class="dpad-slot">${String(sound.slot).padStart(3, '0')}</span>
         <span class="dpad-name">${escapeHtml(sound.name)}</span>
       </button>`;
@@ -574,6 +615,7 @@ function renderDeviceSounds() {
       <button class="button ds-play" data-action="play" title="Écouter">▶</button>
       <span class="ds-slot">${String(sound.slot).padStart(3, '0')}</span>
       <span class="ds-name">${escapeHtml(sound.name)}</span>
+      <span class="ds-size">${formatBytes(sound.size)} · ${sound.duration.toFixed(2)} s</span>
       <span class="ds-bank">${sound.bank ?? ''}</span>
     </div>`;
   }).join('');
@@ -597,6 +639,10 @@ async function connectMidi() {
     }
     updateDeviceBadge();
     renderLivePads();
+    renderDevice();
+    if (!state.device) {
+      log('Note : le MIDI ne permet pas de lire le contenu de la machine (protocole propriétaire). Pour compléter les stats, importe une sauvegarde .pak exportée depuis l’EP Sample Tool officiel.', 'warn');
+    }
   } catch (error) {
     log(error.message, 'error');
     el.deviceBadge.textContent = 'Connexion MIDI impossible';
@@ -890,11 +936,13 @@ function bindEvents() {
     state.midi.selectOutput(event.target.value);
     updateDeviceBadge();
     renderLivePads();
+    renderDevice();
   });
   state.midi.addEventListener('change', () => {
     populateMidiOutputs();
     updateDeviceBadge();
     renderLivePads();
+    renderDevice();
   });
   state.midi.addEventListener('identity', event => renderDeviceIdentity(event.detail));
   state.midi.addEventListener('activity', event => showMidiActivity(event.detail));
@@ -902,6 +950,7 @@ function bindEvents() {
   el.memoryCapacity.addEventListener('change', event => {
     state.memoryKey = event.target.value;
     renderMemory();
+    if (state.device) renderDevice();
   });
   for (const control of [el.convertOnExport, el.convertMono, el.targetSampleRate]) {
     control.addEventListener('change', renderMemory);
@@ -927,6 +976,7 @@ async function init() {
   populateMemoryOptions();
   populateChannelOptions();
   render();
+  renderDevice();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     navigator.serviceWorker.register('./service-worker.js').catch(error => log(`PWA non enregistrée : ${error.message}`, 'warn'));
   }

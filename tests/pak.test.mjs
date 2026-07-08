@@ -44,5 +44,6 @@ test('readZip + readZipEntry relisent une archive store', async () => {
   const entries = readZip(bytes);
   const entry = entries.get('/sounds/001 kick.wav');
   assert.ok(entry, 'entrée présente');
+  assert.equal(entry.uncompSize, 3, 'taille décompressée lue depuis le répertoire central');
   assert.deepEqual([...(await readZipEntry(entry))], [9, 8, 7]);
 });
