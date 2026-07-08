@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "ep-bank-organizer",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["tools/server.mjs"],
+      "port": 3000
+    }
+  ]
+}

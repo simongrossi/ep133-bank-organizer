@@ -1,0 +1,16 @@
+{
+  "name": "EP Bank Organizer",
+  "short_name": "EP Organizer",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#aeb9bf",
+  "theme_color": "#f4511e",
+  "icons": [
+    {
+      "src": "./assets/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

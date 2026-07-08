@@ -1,0 +1,11 @@
+{
+  "format": "epack",
+  "formatVersion": 1,
+  "name": "Exemple Boom Bap",
+  "device": "EP-133 K.O. II",
+  "samples": [
+    { "id": "kick-01", "name": "KICK DUSTY 01", "category": "KICK", "slot": 17 },
+    { "id": "snare-01", "name": "SNARE DUSTY 01", "category": "SNARE", "slot": 113 },
+    { "id": "hat-01", "name": "HH CLOSED 01", "category": "CYMB", "slot": 229 }
+  ]
+}

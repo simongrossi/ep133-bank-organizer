@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#f4511e" />
+  <meta name="description" content="Organisateur local de banques de samples pour EP-133 K.O. II" />
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./assets/icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="./styles.css" />
+  <title>EP Bank Organizer</title>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">EP</div>
+      <div>
+        <h1>Bank Organizer</h1>
+        <p>Classement strict des samples par plages 001–999</p>
+      </div>
+    </div>
+    <div id="deviceBadge" class="status-badge status-off">Aucun périphérique MIDI</div>
+  </header>
+
+  <main class="layout">
+    <aside class="panel sidebar">
+      <section>
+        <div class="section-title-row">
+          <h2>1. Périphérique</h2>
+          <button id="connectMidiBtn" class="button button-primary">Connecter MIDI</button>
+        </div>
+        <label class="field">
+          <span>Sortie MIDI</span>
+          <select id="midiOutputSelect">
+            <option value="">Aucune</option>
+          </select>
+        </label>
+        <label class="toggle-row">
+          <input id="simulationMode" type="checkbox" checked />
+          <span>Mode simulation sécurisé</span>
+        </label>
+        <div class="button-row">
+          <button id="testDeviceBtn" class="button" disabled title="Envoie une requête d’identité MIDI standard et attend la réponse">Tester le matériel</button>
+        </div>
+        <div id="deviceInfo" class="device-info" hidden></div>
+        <div id="midiActivity" class="midi-activity" hidden>
+          <span class="midi-dot"></span>
+          <span id="midiActivityText">En attente d’activité MIDI…</span>
+        </div>
+        <p class="help-text">Le mode simulation déroule tout le flux sans écrire dans l’EP-133. « Tester le matériel » vérifie que l’appareil répond (lecture MIDI standard, sans risque).</p>
+      </section>
+
+      <section>
+        <h2>2. Slots déjà occupés</h2>
+        <label class="field">
+          <span>Exemple : 1-12, 100, 205-220</span>
+          <textarea id="occupiedSlots" rows="4" placeholder="1-12, 100, 205-220"></textarea>
+        </label>
+        <div class="button-row">
+          <button id="applyOccupiedBtn" class="button">Appliquer</button>
+          <button id="loadDemoOccupiedBtn" class="button button-ghost">Démo</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>3. Règles</h2>
+        <label class="toggle-row">
+          <input id="strictMode" type="checkbox" checked />
+          <span>Rangement strict par banque</span>
+        </label>
+        <label class="toggle-row">
+          <input id="fallbackUserBanks" type="checkbox" />
+          <span>Déborder vers USER 1 / USER 2</span>
+        </label>
+        <label class="toggle-row">
+          <input id="preferFilenameSlot" type="checkbox" checked />
+          <span>Respecter un numéro en début de nom</span>
+        </label>
+      </section>
+
+      <section>
+        <h2>4. Conversion</h2>
+        <label class="toggle-row">
+          <input id="convertOnExport" type="checkbox" />
+          <span>Convertir lors de l’export</span>
+        </label>
+        <label class="toggle-row">
+          <input id="convertMono" type="checkbox" checked />
+          <span>Mono</span>
+        </label>
+        <label class="toggle-row">
+          <input id="normalizeAudio" type="checkbox" />
+          <span>Normaliser</span>
+        </label>
+        <label class="toggle-row">
+          <input id="trimSilence" type="checkbox" />
+          <span>Couper le silence</span>
+        </label>
+        <label class="field field-inline">
+          <span>Fréquence cible</span>
+          <input id="targetSampleRate" type="number" min="8000" max="192000" value="46875" />
+        </label>
+      </section>
+    </aside>
+
+    <section class="workspace">
+      <section class="panel import-panel">
+        <div class="section-title-row">
+          <div>
+            <h2>Importer des samples</h2>
+            <p class="muted">Glisse des WAV, un dossier complet ou un pack <code>.epack</code>.</p>
+          </div>
+          <div class="button-row wrap">
+            <label class="button button-primary file-button">
+              Fichiers WAV
+              <input id="wavFileInput" type="file" accept="audio/wav,.wav" multiple />
+            </label>
+            <label class="button file-button">
+              Dossier
+              <input id="folderInput" type="file" accept="audio/wav,.wav" multiple webkitdirectory />
+            </label>
+            <label class="button button-ghost file-button">
+              Pack .epack
+              <input id="epackInput" type="file" accept=".epack,application/zip" />
+            </label>
+          </div>
+        </div>
+
+        <div id="dropZone" class="drop-zone" tabindex="0">
+          <div class="drop-icon">↓</div>
+          <strong>Dépose les samples ici</strong>
+          <span>Le nom du fichier et les dossiers servent à détecter la catégorie.</span>
+        </div>
+      </section>
+
+      <section class="panel live-panel">
+        <div class="section-title-row">
+          <div>
+            <h2>Pads en direct</h2>
+            <p class="muted">Presse un pad de l’appareil : il s’allume ici. Clique un pad : l’appareil le joue. (MIDI standard, sans risque.)</p>
+          </div>
+          <label class="field-inline live-channel">
+            <span>Canal MIDI</span>
+            <select id="midiChannel"></select>
+          </label>
+        </div>
+        <div id="liveStatus" class="live-status">Connecte le MIDI (bouton « Connecter MIDI » à gauche) pour activer les pads en direct.</div>
+        <div id="livePads" class="project-pads" hidden></div>
+      </section>
+
+      <section class="panel device-panel">
+        <div class="section-title-row">
+          <div>
+            <h2>Appareil — sauvegarde .pak</h2>
+            <p class="muted">Lis le contenu réel de ta machine : sons en mémoire et affectation des pads par projet. Lecture seule.</p>
+          </div>
+          <label class="button button-primary file-button">
+            Importer un .pak
+            <input id="pakInput" type="file" accept=".pak,application/zip" />
+          </label>
+        </div>
+
+        <div id="deviceEmpty" class="device-empty">
+          <p>Aucune sauvegarde chargée. Exporte un backup depuis l’EP Sample Tool officiel, puis importe le fichier <code>.pak</code> ici.</p>
+        </div>
+
+        <div id="deviceContent" hidden>
+          <div id="deviceSummary" class="device-summary"></div>
+
+          <div class="device-projects">
+            <div class="section-title-row">
+              <h3>Pads du projet</h3>
+              <label class="field-inline device-project-select">
+                <span>Projet</span>
+                <select id="projectSelect"></select>
+              </label>
+            </div>
+            <div id="projectPads" class="project-pads"></div>
+          </div>
+
+          <div class="device-library">
+            <div class="section-title-row">
+              <h3>Tous les sons en mémoire</h3>
+              <input id="deviceSearch" class="device-search" type="search" placeholder="Filtrer par nom ou slot…" />
+            </div>
+            <div id="deviceSounds" class="device-sounds"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="bankSummary" class="bank-grid" aria-label="Résumé des banques"></section>
+
+      <section class="panel pad-panel">
+        <div class="section-title-row">
+          <div>
+            <h2>Pads</h2>
+            <p class="muted">Clique un pad chargé pour l’écouter. Chaque pad = un slot de la banque.</p>
+          </div>
+          <div class="pad-legend">
+            <span><i class="dot dot-planned"></i>à importer</span>
+            <span><i class="dot dot-occupied"></i>occupé</span>
+            <span><i class="dot dot-free"></i>libre</span>
+          </div>
+        </div>
+        <div id="padBankTabs" class="pad-tabs" role="tablist"></div>
+        <div id="padGrid" class="pad-grid" aria-label="Grille des pads"></div>
+      </section>
+
+      <section class="panel memory-panel">
+        <div class="section-title-row">
+          <div>
+            <h2>Mémoire</h2>
+            <p class="muted">Estimation de l’occupation du plan face à la mémoire de l’appareil.</p>
+          </div>
+          <label class="field-inline memory-capacity">
+            <span>Capacité</span>
+            <select id="memoryCapacity"></select>
+          </label>
+        </div>
+        <div class="memory-bar" aria-hidden="true"><div id="memoryBarFill" class="memory-bar-fill"></div></div>
+        <div id="memoryStats" class="memory-stats"></div>
+        <div id="memoryBanks" class="memory-banks"></div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="section-title-row table-toolbar">
+          <div>
+            <h2>Plan d’import</h2>
+            <p id="sampleCountLabel" class="muted">0 sample</p>
+          </div>
+          <div class="button-row wrap">
+            <button id="reallocateBtn" class="button">Reclasser</button>
+            <button id="clearBtn" class="button button-danger-ghost">Vider</button>
+          </div>
+        </div>
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Écoute</th>
+                <th>Nom</th>
+                <th>Catégorie</th>
+                <th>Slot</th>
+                <th>Format</th>
+                <th>Taille</th>
+                <th>État</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="sampleTableBody">
+              <tr class="empty-row"><td colspan="8">Aucun sample chargé.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel actions-panel">
+        <div>
+          <h2>Exporter / envoyer</h2>
+          <p class="muted">Le pack conserve les WAV, les noms, les catégories et les slots prévus.</p>
+        </div>
+        <div class="button-row wrap">
+          <button id="exportCsvBtn" class="button">CSV</button>
+          <button id="exportJsonBtn" class="button">Manifest JSON</button>
+          <button id="exportPackBtn" class="button button-primary">Créer le .epack</button>
+          <button id="exportHandoffBtn" class="button" title="ZIP de WAV prêts + mapping, à charger avec un outil d’upload EP-133">Dossier de transfert (ZIP)</button>
+          <button id="uploadBtn" class="button button-dark">Envoyer vers l’EP-133</button>
+        </div>
+      </section>
+
+      <section class="panel log-panel">
+        <div class="section-title-row">
+          <h2>Journal</h2>
+          <button id="clearLogBtn" class="button button-ghost button-small">Effacer</button>
+        </div>
+        <pre id="logOutput">Prêt.</pre>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="confirmDialog">
+    <form method="dialog">
+      <h3 id="confirmTitle">Confirmation</h3>
+      <p id="confirmMessage"></p>
+      <div class="button-row end">
+        <button value="cancel" class="button">Annuler</button>
+        <button value="confirm" class="button button-primary">Confirmer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

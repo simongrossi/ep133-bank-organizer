@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="80" fill="#f4511e"/>
+  <rect x="62" y="62" width="388" height="388" rx="36" fill="#e8eceb" stroke="#15191b" stroke-width="18"/>
+  <text x="256" y="298" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="176" font-weight="700" fill="#15191b">EP</text>
+  <rect x="96" y="352" width="320" height="30" fill="#f4511e"/>
+</svg>

@@ -1,0 +1,13 @@
+# Dépendances
+node_modules/
+
+# Sauvegardes appareil et fichiers perso (ne jamais committer de données perso)
+*.pak
+__tmp_*
+
+# Fichiers temporaires / OS
+.DS_Store
+Thumbs.db
+
+# Réglages locaux Claude Code (spécifiques à la machine)
+.claude/settings.local.json
