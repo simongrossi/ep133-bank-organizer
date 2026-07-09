@@ -814,18 +814,25 @@ async function upload() {
     validateBeforeExport();
     const simulation = el.simulationMode.checked;
     if (!simulation && !state.midi.getSelectedOutput()) throw new Error('Sélectionne d’abord une sortie MIDI.');
+
+    // Garde-fou : en envoi réel, on n'accepte que les slots USER (700–899).
+    const outsideUser = simulation ? [] : state.samples.filter(s => !(s.slot >= 700 && s.slot <= 899));
+    if (outsideUser.length) {
+      throw new Error(`Envoi réel limité aux banques USER (700–899) pour ce premier test. ${outsideUser.length} sample(s) hors de cette plage — mets-les sur des slots USER, ou reste en simulation.`);
+    }
+
     const confirmed = await confirmAction(
-      simulation ? 'Lancer la simulation ?' : 'Écrire sur l’EP-133 ?',
+      simulation ? 'Lancer la simulation ?' : '⚠️ ÉCRITURE RÉELLE sur l’EP-133 ?',
       simulation
         ? `${state.samples.length} sample(s) seront simulés, sans aucune écriture.`
-        : `${state.samples.length} sample(s) seront envoyés. Cette action peut remplacer des slots existants.`
+        : `${state.samples.length} sample(s) vont être ÉCRITS sur ta machine (slots USER 700–899). Cette action remplace le contenu de ces slots et n’est pas annulable. Vérifie que ce sont des slots sacrifiables.`
     );
     if (!confirmed) return;
 
     const transport = new Ep133Transport(state.midi, {
       simulation,
-      unlockWrite: false,
-      allowAllBanks: false,
+      unlockWrite: !simulation, // armé uniquement pour un envoi réel confirmé
+      allowAllBanks: false,     // slots USER uniquement
       logger: message => log(message)
     });
     el.uploadBtn.disabled = true;

@@ -32,15 +32,38 @@ test('buildSysExFrame encadre par F0/F7 et rejette les octets >= 0x80', () => {
   assert.throws(() => buildSysExFrame({ manufacturerId: [0x80], command: 0x00 }), RangeError);
 });
 
-test('refuse l’écriture réelle si verrouillée ou sans MIDI sélectionné', async () => {
-  assert.equal(PROTOCOL_CALIBRATED, false, 'le protocole est gardé non calibré par défaut');
-  
-  // 1. Cas non calibré
-  const transportLocked = new Ep133Transport(null, { simulation: false, unlockWrite: false });
-  await assert.rejects(
-    () => transportLocked.uploadBatch([{ slot: 701, name: 'x', file: { arrayBuffer: async () => new ArrayBuffer(0), size: 0 } }]),
-    ProtocolNotImplementedError
-  );
+test('protocole calibré, mais écriture réelle verrouillée sans unlockWrite', async () => {
+  assert.equal(PROTOCOL_CALIBRATED, true, 'protocole validé contre les dumps de référence');
+
+  const sample = { slot: 701, name: 'x', file: { arrayBuffer: async () => new ArrayBuffer(0), size: 0 } };
+
+  // unlockWrite absent → refus explicite (garde-fou principal)
+  const locked = new Ep133Transport(null, { simulation: false, unlockWrite: false });
+  await assert.rejects(() => locked.uploadBatch([sample]), UnsafeWriteError);
+
+  // unlockWrite présent mais aucune sortie MIDI → refus aussi
+  const noOutput = new Ep133Transport({ getSelectedOutput: () => null }, { simulation: false, unlockWrite: true });
+  await assert.rejects(() => noOutput.uploadBatch([sample]), UnsafeWriteError);
+});
+
+test('écriture réelle refusée hors des banques USER', async () => {
+  const midi = { getSelectedOutput: () => ({ send() {} }), send() {} };
+  const transport = new Ep133Transport(midi, { simulation: false, unlockWrite: true });
+  const kickSample = { slot: 1, name: 'kick', file: { arrayBuffer: async () => new ArrayBuffer(0), size: 0 } };
+  await assert.rejects(() => transport.uploadBatch([kickSample]), UnsafeWriteError);
+});
+
+test('la trame delete correspond à la référence garrettjwilke (hors reqId)', () => {
+  // send_tiny_sound / delete_sample_011.syx : f0 00 20 76 33 40 7e 07 05 00 06 00 0b f7
+  // (octets 6 et 7 = flags+reqId de session, masqués)
+  const reference = [0xf0, 0x00, 0x20, 0x76, 0x33, 0x40, 0x7e, 0x07, 0x05, 0x00, 0x06, 0x00, 0x0b, 0xf7];
+  const ours = buildSysExFrame({
+    manufacturerId: [0x00, 0x20, 0x76],
+    command: 5,
+    payload: pack8to7([0x06, 0x00, 0x0b]) // DELETE, node 11 (big-endian)
+  });
+  const mask = arr => [...arr].map((b, i) => (i === 6 || i === 7 ? 0xff : b));
+  assert.deepEqual(mask(ours), mask(reference));
 });
 
 test('la simulation fonctionne et notifie la progression', async () => {

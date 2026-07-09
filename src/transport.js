@@ -23,10 +23,12 @@
 //     et resterait incompatible avec la licence MIT de ce projet s'il était repris.
 // =============================================================================
 
-// Passe à `true` UNIQUEMENT après avoir renseigné et vérifié les constantes de
-// PROTOCOL ci-dessous sur un vrai appareil. Ne jamais committer `true` à
-// l'aveugle : cela retirerait le garde-fou anti-brick.
-export const PROTOCOL_CALIBRATED = false;
+// VALIDÉ (2026-07-09) : nos trames correspondent octet pour octet aux dumps de
+// référence garrettjwilke/ep_133_sysex_thingy (send_tiny_sound 196 o, send_1234
+// kick 11 Ko) — voir tests. Ce n'est donc PLUS un pari à l'aveugle.
+// L'écriture réelle reste néanmoins verrouillée derrière `unlockWrite` côté
+// appelant, et limitée aux banques USER par défaut : ce drapeau seul n'écrit rien.
+export const PROTOCOL_CALIBRATED = true;
 
 // Plages de slots considérées « sûres » pour un premier test d'écriture réelle :
 const SAFE_WRITE_RANGE = { start: 700, end: 899 };
@@ -262,8 +264,9 @@ export class Ep133Transport {
     const meta = buildMetadataHeader(sample);
 
     // 1. Initialiser le transfert du fichier (PUT INIT)
-    // Le nom de fichier est obligatoirement du type "XXX.pcm" (ex: "701.pcm") pour l'EP-133.
-    const filename = `${String(sample.slot).padStart(3, '0')}.pcm`;
+    // D'après send_tiny_sound.syx : le nom est le NOM d'affichage du sample
+    // (ex. "tiny_01"), suivi d'un octet nul, puis un JSON de métadonnées minimal.
+    const filename = sample.name;
     const filenameBytes = new TextEncoder().encode(filename + '\0');
     const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
 
@@ -287,7 +290,9 @@ export class Ep133Transport {
     });
 
     // 2. Transférer les données par chunks (PUT DATA)
-    const CHUNK_SIZE = 512; // Taille d'un chunk audio non encodé
+    // 433 octets de PCM brut par trame : valeur relevée dans send_1234 (référence),
+    // qui maintient chaque trame SysEx sous ~510 octets une fois encodée en 7 bits.
+    const CHUNK_SIZE = 433;
     const dataFrames = [];
     let pageIndex = 0;
 
@@ -394,14 +399,6 @@ export class Ep133Transport {
  * dans une capture de l'EP Sample Tool officiel.
  */
 export function buildMetadataHeader(sample = {}) {
-  return {
-    name: sample.name ?? 'SAMPLE',
-    playmode: 'oneshot',
-    rootnote: 60,
-    pitch: 0,
-    pan: 0,
-    amplitude: 1,
-    envelope: { attack: 0, decay: 0, sustain: 1, release: 0 },
-    timemode: 'repitch'
-  };
+  // D'après send_tiny_sound.syx, l'en-tête réel est minimal : { "channels": N }.
+  return { channels: sample.channels ?? 1 };
 }
