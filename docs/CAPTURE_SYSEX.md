@@ -1,10 +1,17 @@
-# Calibrer l’écriture SysEx réelle vers l’EP-133 K.O. II
+# Capturer / recalibrer le protocole SysEx de l’EP-133 K.O. II
 
-Ce guide explique comment relever le protocole propriétaire d’écriture pour
-renseigner les constantes de [`src/transport.js`](../src/transport.js). Tant que
-`PROTOCOL_CALIBRATED` y vaut `false`, l’application refuse toute écriture réelle
-et n’utilise que la simulation. **C’est volontaire** : envoyer des trames non
-validées peut écraser ou corrompre les données de l’appareil.
+> **État actuel : le protocole d’écriture est déjà calibré et validé.** Nos trames
+> correspondent octet pour octet aux dumps de référence (voir
+> [`PROTOCOL.md`](PROTOCOL.md) et [`../CREDITS.md`](../CREDITS.md)). `PROTOCOL_CALIBRATED`
+> vaut `true` et l’écriture réelle est permise (verrou `unlockWrite`, banques USER only).
+>
+> Ce guide reste utile pour **recapturer** si un firmware change le protocole, ou
+> pour **étendre** la lecture (nouvelles commandes).
+
+Ce guide explique comment relever le protocole propriétaire pour renseigner les
+constantes de [`src/transport.js`](../src/transport.js) et
+[`src/device-scan.js`](../src/device-scan.js). Envoyer des trames non validées peut
+écraser ou corrompre les données de l’appareil.
 
 ## Pourquoi une capture est indispensable
 

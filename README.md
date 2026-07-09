@@ -1,6 +1,9 @@
-# EP Bank Organizer — squelette fonctionnel
+# EP Bank Organizer
 
-Application web locale destinée à préparer des banques de samples pour le Teenage Engineering EP-133 K.O. II en respectant strictement les plages :
+Application web locale (PWA) pour organiser les banques de samples du Teenage
+Engineering EP-133 K.O. II : elle **lit la mémoire de l'appareil directement en
+MIDI**, range les nouveaux sons dans les slots libres de la bonne banque, et peut
+**écrire réellement** sur la machine (protocole validé). Les plages respectées :
 
 | Banque | Plage |
 |---|---:|
@@ -17,9 +20,26 @@ Application web locale destinée à préparer des banques de samples pour le Tee
 
 ## Ce qui fonctionne déjà
 
+### Lire l'appareil directement (MIDI, sans backup)
+- **scan MIDI de la mémoire** : « Connecter MIDI » puis « Scanner la mémoire » (ou
+  scan auto à la connexion) lit **directement** les sons présents, leurs tailles,
+  la mémoire libre/utilisée annoncée par la machine — sans passer par un `.pak` ;
+- **persistance** : l'état de l'appareil (slots occupés, mémoire) est mémorisé et
+  restauré au chargement — plus besoin de re-scanner/ré-importer à chaque fois ;
+- **bouton « Rescanner »** pour relire à la demande.
+
+### Écriture réelle (validée octet-pour-octet)
+- **envoi réel** d'un son vers un slot **USER (700–899)**, via Web MIDI, avec des
+  garde-fous (confirmation, banques USER only) ; protocole **validé** contre des
+  dumps de référence (voir [`docs/PROTOCOL.md`](docs/PROTOCOL.md)) ;
+- **réorganisation des slots** de l'appareil par glisser-déposer, puis application
+  des déplacements sur la machine.
+
+### Organisation et préparation
 - dépôt de fichiers WAV et import d’un dossier complet ;
 - classification automatique par nom de fichier et chemin de dossier ;
-- allocation dans le premier slot libre de la bonne banque ;
+- allocation dans le premier slot libre de la bonne banque, **en évitant les slots
+  réellement occupés sur l'appareil** (scan ou `.pak`) ;
 - respect facultatif d’un numéro placé au début du nom (`208 HAT CLOSED.wav`) ;
 - saisie des slots déjà occupés (`1-12, 100, 205-220`) ;
 - correction manuelle de la catégorie, du nom et du slot ;
@@ -41,23 +61,22 @@ Application web locale destinée à préparer des banques de samples pour le Tee
 
 ## Envoyer réellement les samples
 
-Deux voies :
+Le protocole d'écriture SysEx a été **rétro-ingénieré et validé octet-pour-octet**
+contre des dumps de référence (voir [`docs/PROTOCOL.md`](docs/PROTOCOL.md)). Deux voies :
 
-1. **Voie sûre (recommandée) — dossier de transfert.** Clique sur « Dossier de
-   transfert (ZIP) ». Tu obtiens un `.zip` de WAV prêts (active la conversion
-   pour du 46 875 Hz / 16 bits mono) + un `mapping.csv` indiquant le slot cible.
-   Décompresse-le et charge les fichiers avec un outil d’upload EP-133 éprouvé.
-   Aucune écriture n’est faite par cette application : zéro risque d’écrasement.
+1. **Envoi direct dans l'app (Web MIDI).** Connecte l'EP-133, place un sample sur
+   un slot **USER (700–899)**, décoche « Mode simulation » et envoie. L'écriture
+   reste protégée : confirmation explicite, **slots USER uniquement** par défaut,
+   et un verrou logiciel (`unlockWrite`) côté transport. ⚠️ L'écriture remplace le
+   contenu d'un slot — commence toujours par un slot sacrifiable.
 
-2. **Écriture SysEx native (avancé, à calibrer).** Le bouton « Envoyer vers
-   l’EP-133 » reste en **simulation** par défaut. L’écriture réelle est
-   volontairement verrouillée tant que le protocole propriétaire n’a pas été
-   relevé et vérifié sur l’appareil : envoyer des trames non validées peut
-   écraser ou corrompre des données. Le squelette clean-room et ses garde-fous
-   (banques USER uniquement, déverrouillage explicite) sont dans
-   `src/transport.js` ; la procédure de calibration est détaillée dans
-   [`docs/CAPTURE_SYSEX.md`](docs/CAPTURE_SYSEX.md). La couche Web MIDI générique
-   est dans `src/midi.js`.
+2. **Voie sans écriture — dossier de transfert.** « Dossier de transfert (ZIP) »
+   produit des WAV prêts + un `mapping.csv`, à charger avec un outil externe. Aucune
+   écriture faite par l'app.
+
+Le protocole complet (en-tête TE, PUT INIT/DATA, chunk 433 o, lecture/scan) est
+documenté dans [`docs/PROTOCOL.md`](docs/PROTOCOL.md). La procédure de capture pour
+recalibrer si besoin est dans [`docs/CAPTURE_SYSEX.md`](docs/CAPTURE_SYSEX.md).
 
 ## Démarrage
 
@@ -101,14 +120,21 @@ Web MIDI exige Chrome ou Edge et une page servie depuis `localhost` ou HTTPS.
 
 ## Structure
 
-- `src/config.js` : banques et mots-clés ;
+- `src/config.js` : banques, mots-clés, capacités mémoire ;
 - `src/classifier.js` : détection des catégories ;
 - `src/allocator.js` : attribution et validation des slots ;
-- `src/wav.js` : lecture et conversion audio ;
-- `src/pack.js` : format `.epack` ZIP non compressé ;
-- `src/midi.js` : accès Web MIDI ;
-- `src/transport.js` : adaptateur d’upload réel à compléter ;
+- `src/wav.js` : lecture, conversion audio et PCM brut (`convertWavToRawPcm`) ;
+- `src/pack.js` : formats `.epack` (écriture) et `.pak` (lecture backup) ;
+- `src/padmap.js` : disposition physique des pads ↔ notes MIDI ;
+- `src/stats.js` : estimation mémoire du plan d'import ;
+- `src/midi.js` : Web MIDI, Identity Reply, activité et capture SysEx ;
+- `src/transport.js` : protocole d'écriture SysEx **validé** (upload, delete) ;
+- `src/device-scan.js` : requêtes et parsing du **scan MIDI** de la mémoire ;
+- `src/device-sync.js` : plage d'écriture sûre et faisabilité des déplacements ;
+- `src/device-audio.js` : état de lecture des sons appareil ;
 - `src/app.js` : interface et orchestration.
+
+Protocole SysEx complet : [`docs/PROTOCOL.md`](docs/PROTOCOL.md).
 
 ## Format de sauvegarde `.pak` (lecture)
 
@@ -138,9 +164,12 @@ Le format est volontairement simple, lisible et versionné.
 
 ## Sources et licences
 
-Ce squelette est une implémentation originale sous licence MIT. Il ne copie pas le code des projets de référence.
+Implémentation **originale sous licence MIT**, rétro-ingénierée en **clean-room** :
+on réutilise des *faits* de protocole (non protégeables), corroborés par des projets
+publics, **sans copier leur code**. `phones24/ep133-export-to-daw` étant AGPL-3.0,
+l'absence de reprise de son code est vérifiée — donc pas de contamination de licence.
 
-- `phones24/ep133-export-to-daw` est sous AGPL-3.0. Toute reprise directe de son code doit respecter cette licence.
-- `garrettjwilke/ep_133_sysex_thingy` documente des essais SysEx mais ne fournit pas, au moment de la conception de ce squelette, une licence explicite autorisant la copie de son code ou de ses fichiers binaires.
+L'attribution détaillée, l'audit de copie et l'origine de chaque brique de code sont
+dans **[`CREDITS.md`](CREDITS.md)**.
 
 Le projet n’est ni affilié ni approuvé par Teenage Engineering.
