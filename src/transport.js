@@ -29,35 +29,24 @@
 export const PROTOCOL_CALIBRATED = false;
 
 // Plages de slots considérées « sûres » pour un premier test d'écriture réelle :
-// les banques USER 1 (700–799) et USER 2 (800–899), les moins risquées à écraser.
 const SAFE_WRITE_RANGE = { start: 700, end: 899 };
 
-// ----------------------------------------------------------------------------
-// Constantes de PROTOCOLE — À CALIBRER (voir docs/CAPTURE_SYSEX.md)
-// ----------------------------------------------------------------------------
-// Tout ce qui suit est un GABARIT. Les valeurs réelles doivent être extraites de
-// tes captures. Les octets marqués `null` doivent être remplis avant activation.
+// Constantes de PROTOCOLE basées sur ep133-export-to-daw
 export const PROTOCOL = {
-  // ID fabricant SysEx de Teenage Engineering (1 ou 3 octets, chacun < 0x80).
-  // À relever au début de chaque trame F0 émise par l'EP Sample Tool officiel.
-  manufacturerId: null, // ex. [0x00, 0x20, 0x76]  ← À VÉRIFIER
+  // ID fabricant SysEx de Teenage Engineering (0, 32, 118)
+  manufacturerId: [0x00, 0x20, 0x76], 
 
-  // Octet(s) de commande observés pour chaque opération.
   commands: {
-    handshake: null, // trame d'init ("init.syx") envoyée avant tout transfert
-    uploadBegin: null, // début de transfert d'un sample (slot + longueur + méta)
-    uploadData: null, // paquet(s) de données audio
-    uploadEnd: null, // fin de transfert / checksum
-    deleteSlot: null // suppression du sample d'un slot ("delete_sample_XXX.syx")
+    handshake: 1,      // TE_SYSEX_GREET
+    // Note : ep133-export-to-daw utilise 5 (TE_SYSEX_FILE) pour lire. 
+    // Il faudra vérifier si l'écriture utilise la même commande ou une autre (ex: 2, 5, ou 6).
+    uploadBegin: 5, 
+    uploadData: 5, 
+    uploadEnd: 5, 
+    deleteSlot: 5 
   },
 
-  // L'appareil attend un WAV PCM 16 bits mono à cette fréquence, précédé d'un
-  // en-tête JSON de métadonnées (playmode, rootnote, pitch, pan, amplitude,
-  // enveloppe, timemode). Le schéma exact est à confirmer depuis une capture.
   audio: { sampleRate: 46875, bitsPerSample: 16, channels: 1 },
-
-  // true si le payload est encodé sur 7 bits (obligatoire dès qu'un octet
-  // dépasse 0x7F, ce qui est le cas de l'audio brut). Presque certainement true.
   sevenBitEncoded: true
 };
 
@@ -121,16 +110,41 @@ export function unpack7to8(bytes) {
 // Assemble F0 <manufacturerId...> <command...> <payload7bit...> F7 et vérifie
 // qu'aucun octet interne ne dépasse 0x7F (sinon la trame serait invalide).
 
+// Compteur global pour tracer les requêtes
+let currentRequestId = 1;
+
 export function buildSysExFrame({ manufacturerId, command, payload = [] } = {}) {
+  // Constantes de structure TE (issues de ep133-export-to-daw)
+  const IDENTITY_CODE = 0x33; // 0x33 = 51 est le code produit de l'EP-133
+  const MIDI_SYSEX_TE = 64; // 0x40
+  const BIT_IS_REQUEST = 64;
+  const BIT_REQUEST_ID_AVAILABLE = 32;
+
+  // Récupération et incrémentation de l'ID de requête (1 à 127 max)
+  const requestId = currentRequestId;
+  currentRequestId = (currentRequestId % 127) + 1; 
+
   const idBytes = Array.isArray(manufacturerId) ? manufacturerId : [manufacturerId];
-  const cmdBytes = Array.isArray(command) ? command : [command];
-  const body = [...idBytes, ...cmdBytes, ...payload];
+  
+  // Construction de l'en-tête propriétaire Teenage Engineering
+  const header = [
+    ...idBytes,
+    IDENTITY_CODE,
+    MIDI_SYSEX_TE,
+    BIT_IS_REQUEST | BIT_REQUEST_ID_AVAILABLE | ((requestId >> 7) & 0x1f),
+    requestId & 0x7f,
+    command
+  ];
+
+  const body = [...header, ...payload];
 
   for (const byte of body) {
     if (!Number.isInteger(byte) || byte < 0 || byte > 0x7f) {
       throw new RangeError(`Octet SysEx invalide (${byte}) : tout octet entre F0 et F7 doit rester < 0x80.`);
     }
   }
+  
+  // Encapsulation dans les marqueurs MIDI standard (F0 ... F7)
   return Uint8Array.from([0xf0, ...body, 0xf7]);
 }
 
@@ -189,6 +203,10 @@ export class Ep133Transport {
     this.#send(this.#frameHandshake());
     await delay(50);
 
+    this.logger('Initialisation du gestionnaire de fichiers…');
+    this.#send(this.#frameFileInit());
+    await delay(50);
+
     for (let index = 0; index < samples.length; index += 1) {
       const sample = samples[index];
       this.logger(`Envoi ${String(sample.slot).padStart(3, '0')} — ${sample.name}`);
@@ -226,58 +244,147 @@ export class Ep133Transport {
     });
   }
 
+  #frameFileInit() {
+    // 0x01 (TE_SYSEX_FILE_INIT), flags = 0x01, maxResponseLength = 4MB (0x00400000)
+    const initData = new Uint8Array([0x01, 0x01, 0x00, 0x40, 0x00, 0x00]);
+    return buildSysExFrame({
+      manufacturerId: PROTOCOL.manufacturerId,
+      command: 5,
+      payload: pack8to7(initData)
+    });
+  }
+
   /**
    * Retourne la liste des trames pour un sample : begin (slot + méta), data…, end.
-   * Le découpage exact (taille des chunks, place de la longueur, checksum) est à
-   * confirmer sur capture. La structure est volontairement explicite pour être
-   * facile à corriger.
    */
   async #framesForSample(sample) {
     const audioBytes = new Uint8Array(await (sample.audioBlob ?? sample.file).arrayBuffer());
     const meta = buildMetadataHeader(sample);
-    const encoded = PROTOCOL.sevenBitEncoded ? pack8to7(audioBytes) : audioBytes;
 
-    const slotHi = (sample.slot >> 7) & 0x7f;
-    const slotLo = sample.slot & 0x7f;
+    // 1. Initialiser le transfert du fichier (PUT INIT)
+    // Le nom de fichier est obligatoirement du type "XXX.pcm" (ex: "701.pcm") pour l'EP-133.
+    const filename = `${String(sample.slot).padStart(3, '0')}.pcm`;
+    const filenameBytes = new TextEncoder().encode(filename + '\0');
+    const metaBytes = new TextEncoder().encode(JSON.stringify(meta));
+
+    const initData = new Uint8Array(11 + filenameBytes.length + metaBytes.length);
+    const view = new DataView(initData.buffer);
+
+    view.setUint8(0, 0x02); // PUT
+    view.setUint8(1, 0x00); // INIT
+    view.setUint8(2, 0x05); // Flags
+    view.setUint16(3, sample.slot); // Node ID (slot)
+    view.setUint16(5, 1000); // Parent ID (1000 = "sound")
+    view.setUint32(7, audioBytes.length); // size of raw audio
+
+    initData.set(filenameBytes, 11);
+    initData.set(metaBytes, 11 + filenameBytes.length);
 
     const begin = buildSysExFrame({
       manufacturerId: PROTOCOL.manufacturerId,
-      command: PROTOCOL.commands.uploadBegin,
-      payload: [slotHi, slotLo, ...pack8to7(new TextEncoder().encode(JSON.stringify(meta)))]
+      command: 5,
+      payload: pack8to7(initData)
     });
 
-    // Découpage en paquets — taille de chunk à caler sur ce que tolère l'appareil.
-    const CHUNK = 512;
+    // 2. Transférer les données par chunks (PUT DATA)
+    const CHUNK_SIZE = 512; // Taille d'un chunk audio non encodé
     const dataFrames = [];
-    for (let offset = 0; offset < encoded.length; offset += CHUNK) {
+    let pageIndex = 0;
+
+    for (let offset = 0; offset < audioBytes.length; offset += CHUNK_SIZE) {
+      const chunk = audioBytes.subarray(offset, offset + CHUNK_SIZE);
+      const chunkData = new Uint8Array(4 + chunk.length);
+      const chunkView = new DataView(chunkData.buffer);
+
+      chunkView.setUint8(0, 0x02); // PUT
+      chunkView.setUint8(1, 0x01); // DATA
+      chunkView.setUint16(2, pageIndex); // Index de page
+
+      chunkData.set(chunk, 4);
+
       dataFrames.push(
         buildSysExFrame({
           manufacturerId: PROTOCOL.manufacturerId,
-          command: PROTOCOL.commands.uploadData,
-          payload: [...encoded.subarray(offset, offset + CHUNK)]
+          command: 5,
+          payload: pack8to7(chunkData)
         })
       );
+      pageIndex += 1;
     }
+
+    // 3. Clôturer le transfert en envoyant une page vide (EOF)
+    const eofData = new Uint8Array(4);
+    const eofView = new DataView(eofData.buffer);
+    eofView.setUint8(0, 0x02); // PUT
+    eofView.setUint8(1, 0x01); // DATA
+    eofView.setUint16(2, pageIndex); // Index de page de fin
 
     const end = buildSysExFrame({
       manufacturerId: PROTOCOL.manufacturerId,
-      command: PROTOCOL.commands.uploadEnd,
-      payload: [slotHi, slotLo]
+      command: 5,
+      payload: pack8to7(eofData)
     });
 
-    return [begin, ...dataFrames, end];
+    // 4. Trames de vérification post-transfert (simule le comportement de l'outil officiel)
+    const infoFrame = buildSysExFrame({
+      manufacturerId: PROTOCOL.manufacturerId,
+      command: 5,
+      payload: pack8to7(new Uint8Array([0x0b, (sample.slot >> 8) & 0xff, sample.slot & 0xff]))
+    });
+
+    const refManagerInit = buildSysExFrame({
+      manufacturerId: PROTOCOL.manufacturerId,
+      command: 5,
+      payload: pack8to7(new Uint8Array([0x01, 0x01, 0x00, 0x40, 0x00, 0x00]))
+    });
+
+    const metaFrame = buildSysExFrame({
+      manufacturerId: PROTOCOL.manufacturerId,
+      command: 5,
+      payload: pack8to7(new Uint8Array([0x07, 0x02, (sample.slot >> 8) & 0xff, sample.slot & 0xff, 0x00, 0x00]))
+    });
+
+    const parentMetaFrame = buildSysExFrame({
+      manufacturerId: PROTOCOL.manufacturerId,
+      command: 5,
+      payload: pack8to7(new Uint8Array([0x07, 0x02, 0x03, 0xE8, 0x00, 0x00]))
+    });
+
+    return [
+      begin,
+      ...dataFrames,
+      end,
+      infoFrame,
+      refManagerInit,
+      infoFrame,
+      metaFrame,
+      parentMetaFrame
+    ];
   }
 
-  /** Supprime le sample d'un slot (opération unitaire, plus sûre à tester d'abord). */
+  /** Supprime le sample d'un slot. */
   async deleteSlot(slot) {
     this.assertWriteAllowed([{ slot }]);
+    const payloadData = new Uint8Array([0x06, (slot >> 8) & 0xff, slot & 0xff]);
     const frame = buildSysExFrame({
       manufacturerId: PROTOCOL.manufacturerId,
-      command: PROTOCOL.commands.deleteSlot,
-      payload: [(slot >> 7) & 0x7f, slot & 0x7f]
+      command: 5,
+      payload: pack8to7(payloadData)
     });
     this.logger(`Suppression du slot ${String(slot).padStart(3, '0')}…`);
     this.#send(frame);
+  }
+
+  getHandshakeFrame() {
+    return this.#frameHandshake();
+  }
+
+  getFileInitFrame() {
+    return this.#frameFileInit();
+  }
+
+  async getFramesForSample(sample) {
+    return this.#framesForSample(sample);
   }
 }
 

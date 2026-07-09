@@ -2,7 +2,7 @@ import { BANKS, BANK_BY_KEY, EP133_TARGET_SAMPLE_RATE, EP133_MEMORY_OPTIONS, EP1
 import { summarizeMemory, secondsForBytes } from './stats.js';
 import { classifySample, extractPreferredSlot } from './classifier.js';
 import { allocateSamples, parseOccupiedSlots, summarizeBanks, validatePlan, isSlotInsideBank } from './allocator.js';
-import { inspectWav, convertWav } from './wav.js';
+import { inspectWav, convertWav, convertWavToRawPcm } from './wav.js';
 import { createEpack, readEpack, createHandoffBundle } from './pack.js';
 import { parsePak, DEVICE_LAYOUT } from './pak.js';
 import { noteToGroupPad, groupPadToNote, GROUP_LABELS, PAD_LABELS, PAD_DISPLAY_ORDER } from './padmap.js';
@@ -33,7 +33,7 @@ const el = Object.fromEntries([
   'targetSampleRate', 'wavFileInput', 'folderInput', 'epackInput', 'dropZone', 'bankSummary',
   'padBankTabs', 'padGrid',
   'sampleTableBody', 'sampleCountLabel', 'reallocateBtn', 'clearBtn', 'exportCsvBtn',
-  'exportJsonBtn', 'exportPackBtn', 'exportHandoffBtn', 'uploadBtn', 'logOutput', 'clearLogBtn',
+  'exportJsonBtn', 'exportPackBtn', 'exportHandoffBtn', 'exportSysexBtn', 'uploadBtn', 'logOutput', 'clearLogBtn',
   'testDeviceBtn', 'deviceInfo', 'midiActivity', 'midiActivityText',
   'memoryCapacity', 'memoryBarFill', 'memoryStats', 'memoryBanks',
   'pakInput', 'deviceEmpty', 'deviceContent', 'deviceSummary', 'deviceBarFill', 'deviceBanks', 'projectSelect',
@@ -414,6 +414,70 @@ async function exportHandoff() {
   }
 }
 
+async function exportSysex() {
+  try {
+    validateBeforeExport();
+    el.exportSysexBtn.disabled = true;
+    log('Génération du fichier SysEx (.syx)…');
+
+    // 1. Initialiser le transport en mode virtuel/neutre (pour générer les trames sans envoyer)
+    const transport = new Ep133Transport(null, {
+      simulation: true,
+      unlockWrite: true,
+      allowAllBanks: true,
+      logger: () => {}
+    });
+
+    // 2. Conversion préalable de tous les fichiers WAV en PCM brut
+    const convertedSamples = [];
+    log('Conversion des fichiers audio en PCM brut (46875 Hz, 16-bit mono)…');
+    for (const sample of state.samples) {
+      log(`Conversion : ${sample.name}…`);
+      try {
+        const rawBlob = await convertWavToRawPcm(sample.file, {
+          targetSampleRate: EP133_TARGET_SAMPLE_RATE,
+          mono: true,
+          normalize: el.normalizeAudio.checked,
+          trimSilence: el.trimSilence.checked
+        });
+        convertedSamples.push({
+          ...sample,
+          audioBlob: rawBlob
+        });
+      } catch (err) {
+        throw new Error(`Erreur lors de la conversion de ${sample.name} : ${err.message}`);
+      }
+    }
+
+    // 3. Récupérer toutes les trames sous forme d'octets
+    const allBytes = [];
+    
+    // Handshake
+    allBytes.push(...transport.getHandshakeFrame());
+    
+    // File Init
+    allBytes.push(...transport.getFileInitFrame());
+
+    for (const sample of convertedSamples) {
+      const frames = await transport.getFramesForSample(sample);
+      for (const frame of frames) {
+        allBytes.push(...frame);
+      }
+    }
+
+    const sysexData = new Uint8Array(allBytes);
+    const blob = new Blob([sysexData], { type: 'application/octet-stream' });
+    const filename = `ep133_transfer_${new Date().toISOString().slice(0, 10)}.syx`;
+    downloadBlob(blob, filename);
+    log(`Fichier SysEx généré avec succès : ${filename} (${formatBytes(blob.size)}).`);
+    log('Tu peux maintenant comparer ce fichier octet par octet avec send_tiny_sound.syx.');
+  } catch (error) {
+    log(error.message, 'error');
+  } finally {
+    el.exportSysexBtn.disabled = false;
+  }
+}
+
 function exportJson() {
   try {
     validateBeforeExport();
@@ -758,9 +822,40 @@ async function upload() {
     );
     if (!confirmed) return;
 
-    const transport = new Ep133Transport(state.midi, { simulation, logger: message => log(message) });
+    const transport = new Ep133Transport(state.midi, {
+      simulation,
+      unlockWrite: false,
+      allowAllBanks: false,
+      logger: message => log(message)
+    });
     el.uploadBtn.disabled = true;
-    await transport.uploadBatch(state.samples, ({ index, total, sample }) => {
+
+    // Conversion préalable des fichiers WAV en PCM brut (mono, 46875 Hz) pour le matériel
+    const convertedSamples = [];
+    if (!simulation) {
+      log('Préparation et conversion des fichiers audio en PCM brut (46875 Hz, 16-bit mono)…');
+      for (const sample of state.samples) {
+        log(`Conversion : ${sample.name}…`);
+        try {
+          const rawBlob = await convertWavToRawPcm(sample.file, {
+            targetSampleRate: EP133_TARGET_SAMPLE_RATE,
+            mono: true,
+            normalize: el.normalizeAudio.checked,
+            trimSilence: el.trimSilence.checked
+          });
+          convertedSamples.push({
+            ...sample,
+            audioBlob: rawBlob
+          });
+        } catch (err) {
+          throw new Error(`Erreur lors de la conversion de ${sample.name} : ${err.message}`);
+        }
+      }
+    } else {
+      convertedSamples.push(...state.samples);
+    }
+
+    await transport.uploadBatch(convertedSamples, ({ index, total, sample }) => {
       el.uploadBtn.textContent = `${index}/${total} · ${String(sample.slot).padStart(3, '0')}`;
     });
   } catch (error) {
@@ -929,6 +1024,7 @@ function bindEvents() {
   el.exportJsonBtn.addEventListener('click', exportJson);
   el.exportPackBtn.addEventListener('click', exportPack);
   el.exportHandoffBtn.addEventListener('click', exportHandoff);
+  el.exportSysexBtn.addEventListener('click', exportSysex);
   el.uploadBtn.addEventListener('click', upload);
   el.connectMidiBtn.addEventListener('click', connectMidi);
   el.testDeviceBtn.addEventListener('click', testDevice);

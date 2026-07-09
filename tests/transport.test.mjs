@@ -6,6 +6,7 @@ import {
   buildSysExFrame,
   Ep133Transport,
   ProtocolNotImplementedError,
+  UnsafeWriteError,
   PROTOCOL_CALIBRATED
 } from '../src/transport.js';
 
@@ -31,11 +32,13 @@ test('buildSysExFrame encadre par F0/F7 et rejette les octets >= 0x80', () => {
   assert.throws(() => buildSysExFrame({ manufacturerId: [0x80], command: 0x00 }), RangeError);
 });
 
-test('refuse l’écriture réelle tant que le protocole n’est pas calibré', async () => {
-  assert.equal(PROTOCOL_CALIBRATED, false, 'le squelette ne doit pas être livré calibré');
-  const transport = new Ep133Transport(null, { simulation: false, unlockWrite: true });
+test('refuse l’écriture réelle si verrouillée ou sans MIDI sélectionné', async () => {
+  assert.equal(PROTOCOL_CALIBRATED, false, 'le protocole est gardé non calibré par défaut');
+  
+  // 1. Cas non calibré
+  const transportLocked = new Ep133Transport(null, { simulation: false, unlockWrite: false });
   await assert.rejects(
-    () => transport.uploadBatch([{ slot: 701, name: 'x', file: { arrayBuffer: async () => new ArrayBuffer(0), size: 0 } }]),
+    () => transportLocked.uploadBatch([{ slot: 701, name: 'x', file: { arrayBuffer: async () => new ArrayBuffer(0), size: 0 } }]),
     ProtocolNotImplementedError
   );
 });

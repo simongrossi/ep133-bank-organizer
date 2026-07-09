@@ -161,3 +161,59 @@ export async function convertWav(file, options = {}) {
     await audioContext.close().catch(() => {});
   }
 }
+
+export function encodeRawPcm16(floatData) {
+  const bytesPerSample = 2;
+  const dataSize = floatData.length * bytesPerSample;
+  const buffer = new ArrayBuffer(dataSize);
+  const view = new DataView(buffer);
+
+  let offset = 0;
+  for (const sample of floatData) {
+    const clamped = clamp(sample, -1, 1);
+    view.setInt16(offset, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+    offset += 2;
+  }
+  return new Blob([buffer], { type: 'application/octet-stream' });
+}
+
+export async function convertWavToRawPcm(file, options = {}) {
+  const {
+    targetSampleRate = 46875,
+    mono = true,
+    normalize = false,
+    trimSilence = false
+  } = options;
+
+  const audioContext = new AudioContext();
+  try {
+    const decoded = await audioContext.decodeAudioData(await file.arrayBuffer());
+    const targetChannels = mono ? 1 : Math.min(2, decoded.numberOfChannels);
+    const targetLength = Math.max(1, Math.ceil(decoded.duration * targetSampleRate));
+    const offline = new OfflineAudioContext(targetChannels, targetLength, targetSampleRate);
+    const source = offline.createBufferSource();
+    source.buffer = decoded;
+    if (mono && decoded.numberOfChannels > 1) {
+      const merger = offline.createChannelMerger(1);
+      const gain = offline.createGain();
+      gain.gain.value = 1 / decoded.numberOfChannels;
+      for (let channel = 0; channel < decoded.numberOfChannels; channel += 1) {
+        const splitter = offline.createChannelSplitter(decoded.numberOfChannels);
+        source.connect(splitter);
+        splitter.connect(gain, channel, 0);
+      }
+      gain.connect(merger, 0, 0);
+      merger.connect(offline.destination);
+    } else {
+      source.connect(offline.destination);
+    }
+    source.start();
+    const rendered = await offline.startRendering();
+    let { interleaved, channels } = interleaveChannels(rendered, mono);
+    if (trimSilence) interleaved = trimFloatData(interleaved, channels);
+    if (normalize) interleaved = normalizeFloatData(interleaved);
+    return encodeRawPcm16(interleaved);
+  } finally {
+    await audioContext.close().catch(() => {});
+  }
+}

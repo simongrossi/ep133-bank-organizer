@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ep-bank-organizer-v2';
+const CACHE_NAME = 'ep-bank-organizer-v4';
 const APP_SHELL = [
   './',
   './index.html',
