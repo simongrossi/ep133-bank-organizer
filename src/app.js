@@ -53,7 +53,7 @@ const el = Object.fromEntries([
   'padBankTabs', 'padGrid',
   'sampleTableBody', 'sampleCountLabel', 'reallocateBtn', 'clearBtn', 'exportCsvBtn',
   'exportJsonBtn', 'exportPackBtn', 'exportHandoffBtn', 'exportSysexBtn', 'uploadBtn', 'logOutput', 'clearLogBtn',
-  'testDeviceBtn', 'scanDeviceBtn', 'deviceInfo', 'midiActivity', 'midiActivityText',
+  'testDeviceBtn', 'scanDeviceBtn', 'autoScanConnect', 'rescanDeviceBtn', 'deviceInfo', 'midiActivity', 'midiActivityText',
   'memoryCapacity', 'memoryBarFill', 'memoryStats', 'memoryBanks',
   'pakInput', 'deviceEmpty', 'deviceContent', 'deviceSummary', 'deviceBarFill', 'deviceBanks', 'projectSelect',
   'projectPads', 'deviceSearch', 'deviceSounds', 'midiChannel', 'livePads', 'liveStatus',
@@ -314,7 +314,11 @@ function renderMemory() {
   const summary = summarizeMemory(state.samples, { capacityBytes, conversion: currentConversion() });
 
   // Si un appareil est connu (.pak ou scan MIDI), le plan d'import s'ajoute par-dessus.
-  const deviceBytes = state.device ? state.device.sounds.reduce((sum, sound) => sum + sound.size, 0) : 0;
+  // On préfère la mémoire réellement annoncée par la machine (inclut projets/patterns
+  // et overhead du système de fichiers) ; à défaut, la somme des tailles de sons.
+  const deviceBytes = state.device
+    ? (state.device.memory?.usedBytes ?? state.device.sounds.reduce((sum, sound) => sum + sound.size, 0))
+    : 0;
   const combined = deviceBytes + summary.totalBytes;
   const usedRatio = capacityBytes > 0 ? Math.min(1, combined / capacityBytes) : 0;
   const over = combined > capacityBytes;
@@ -896,20 +900,25 @@ function renderDevice() {
   el.deviceEmpty.classList.remove('is-midi-connected');
 
   const capacity = currentCapacityBytes();
-  const totalBytes = device.sounds.reduce((sum, sound) => sum + sound.size, 0);
+  const soundBytes = device.sounds.reduce((sum, sound) => sum + sound.size, 0);
+  // Mémoire réellement utilisée annoncée par la machine (inclut projets/patterns +
+  // overhead) si disponible ; sinon la somme des tailles de sons.
+  const usedBytes = device.memory?.usedBytes ?? soundBytes;
+  const overhead = usedBytes - soundBytes;
   const totalDuration = device.sounds.reduce((sum, sound) => sum + sound.duration, 0);
-  const usedRatio = capacity > 0 ? Math.min(1, totalBytes / capacity) : 0;
+  const usedRatio = capacity > 0 ? Math.min(1, usedBytes / capacity) : 0;
   const percent = (usedRatio * 100).toFixed(usedRatio >= 0.1 ? 0 : 1);
   const projectLabel = device.projects.length ? `${device.projects.length} projet(s)` : (device.source === 'midi-scan' ? 'projets non lus' : '0 projet');
 
   el.deviceSummary.innerHTML = [
     `<span><b>${device.sounds.length}</b> son(s) · ${projectLabel}</span>`,
-    `<span><b>${formatBytes(totalBytes)}</b> / ${formatBytes(capacity)} <small class="${totalBytes > capacity ? 'stat-over' : 'muted'}">(${percent}%)</small></span>`,
-    `<span><b>${formatBytes(Math.max(0, capacity - totalBytes))}</b> restants</span>`,
+    `<span><b>${formatBytes(usedBytes)}</b> / ${formatBytes(capacity)} <small class="${usedBytes > capacity ? 'stat-over' : 'muted'}">(${percent}%)</small></span>`,
+    device.memory && overhead > 0 ? `<span class="muted"><b>${formatBytes(soundBytes)}</b> de sons + ${formatBytes(overhead)} projets/système</span>` : '',
+    `<span><b>${formatBytes(Math.max(0, capacity - usedBytes))}</b> restants</span>`,
     `<span>≈ <b>${formatDuration(totalDuration)}</b> d’audio</span>`
-  ].join('');
+  ].filter(Boolean).join('');
   el.deviceBarFill.style.width = `${Math.round(usedRatio * 100)}%`;
-  el.deviceBarFill.classList.toggle('is-over', totalBytes > capacity);
+  el.deviceBarFill.classList.toggle('is-over', usedBytes > capacity);
 
   // Répartition par banque (taille réelle occupée sur l'appareil)
   const perBank = new Map(BANKS.map(bank => [bank.key, { label: bank.label, bytes: 0, count: 0 }]));
@@ -1039,6 +1048,7 @@ async function connectMidi() {
     populateMidiOutputs(outputs);
     el.testDeviceBtn.disabled = false;
     el.scanDeviceBtn.disabled = false;
+    if (el.rescanDeviceBtn) el.rescanDeviceBtn.disabled = false;
     const inputs = state.midi.listInputs();
     log(`${inputs.length} entrée(s) MIDI à l’écoute — presse un pad de l’appareil pour vérifier.`);
     const likely = state.midi.findLikelyEp133Output();
@@ -1052,7 +1062,12 @@ async function connectMidi() {
     updateDeviceBadge();
     renderLivePads();
     renderDevice();
-    if (!state.device) {
+
+    // Scan auto : dès qu'une sortie EP-133 est sélectionnée, on lit la mémoire.
+    if (likely && el.autoScanConnect?.checked) {
+      log('Scan auto activé : lecture des sons et de la mémoire depuis l’EP-133…');
+      await scanDevice();
+    } else if (!state.device) {
       log('MIDI prêt. Clique « Scanner la mémoire » pour lire les slots et les stats directement depuis l’EP-133.');
     }
   } catch (error) {
@@ -1600,6 +1615,7 @@ function bindEvents() {
   el.connectMidiBtn.addEventListener('click', connectMidi);
   el.testDeviceBtn.addEventListener('click', testDevice);
   el.scanDeviceBtn.addEventListener('click', scanDevice);
+  el.rescanDeviceBtn?.addEventListener('click', scanDevice);
   el.midiOutputSelect.addEventListener('change', event => {
     state.midi.selectOutput(event.target.value);
     updateDeviceBadge();

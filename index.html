@@ -32,6 +32,10 @@
           <button id="connectMidiBtn" class="button button-primary">Connecter MIDI</button>
           <button id="scanDeviceBtn" class="button button-dark" disabled title="Lit les slots et les statistiques mémoire de l’appareil via SysEx">Scanner la mémoire</button>
         </div>
+        <label class="toggle-row">
+          <input id="autoScanConnect" type="checkbox" checked />
+          <span>Scan auto à la connexion (30–60 s)</span>
+        </label>
         <div id="deviceInfo" class="device-info" hidden></div>
         <div id="midiActivity" class="midi-activity" hidden>
           <span class="midi-dot"></span>
@@ -184,10 +188,13 @@
             <h2>Appareil</h2>
             <p class="muted">Le scan MIDI lit les sons et la mémoire. Le .pak ajoute l’audio et les projets.</p>
           </div>
-          <label class="button button-primary file-button">
-            Importer un .pak
-            <input id="pakInput" type="file" accept=".pak,application/zip" />
-          </label>
+          <div class="button-row wrap">
+            <button id="rescanDeviceBtn" class="button" disabled title="Relit les sons et la mémoire depuis l’EP-133">Rescanner</button>
+            <label class="button button-primary file-button">
+              Importer un .pak
+              <input id="pakInput" type="file" accept=".pak,application/zip" />
+            </label>
+          </div>
         </div>
 
         <div id="deviceEmpty" class="device-empty">
