@@ -73,6 +73,12 @@ export class MidiManager extends EventTarget {
       this.dispatchEvent(new CustomEvent('identity', { detail: identity }));
       return;
     }
+    // Réponse SysEx propriétaire (F0 … F7) : on la transmet telle quelle pour
+    // le scan de l'appareil (lecture de la mémoire).
+    if (bytes[0] === 0xf0) {
+      this.dispatchEvent(new CustomEvent('sysex', { detail: { data: [...bytes] } }));
+      return;
+    }
     // Activité « live » : notes et autres messages courts, pour voir le matériel réagir.
     const status = bytes[0] & 0xf0;
     const channel = bytes[0] & 0x0f;

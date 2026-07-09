@@ -7,7 +7,7 @@ import { createEpack, readEpack, createHandoffBundle } from './pack.js';
 import { parsePak, DEVICE_LAYOUT } from './pak.js';
 import { noteToGroupPad, groupPadToNote, GROUP_LABELS, PAD_LABELS, PAD_DISPLAY_ORDER } from './padmap.js';
 import { MidiManager } from './midi.js';
-import { Ep133Transport, ProtocolNotImplementedError } from './transport.js';
+import { Ep133Transport, ProtocolNotImplementedError, buildSysExFrame, PROTOCOL } from './transport.js';
 import { createId, csvEscape, downloadBlob, formatBytes, sanitizeName } from './utils.js';
 
 const state = {
@@ -48,7 +48,7 @@ const el = Object.fromEntries([
   'padBankTabs', 'padGrid',
   'sampleTableBody', 'sampleCountLabel', 'reallocateBtn', 'clearBtn', 'exportCsvBtn',
   'exportJsonBtn', 'exportPackBtn', 'exportHandoffBtn', 'exportSysexBtn', 'uploadBtn', 'logOutput', 'clearLogBtn',
-  'testDeviceBtn', 'deviceInfo', 'midiActivity', 'midiActivityText',
+  'testDeviceBtn', 'scanDeviceBtn', 'deviceInfo', 'midiActivity', 'midiActivityText',
   'memoryCapacity', 'memoryBarFill', 'memoryStats', 'memoryBanks',
   'pakInput', 'deviceEmpty', 'deviceContent', 'deviceSummary', 'deviceBarFill', 'deviceBanks', 'projectSelect',
   'projectPads', 'deviceSearch', 'deviceSounds', 'midiChannel', 'livePads', 'liveStatus',
@@ -743,6 +743,7 @@ async function connectMidi() {
     const outputs = await state.midi.connect();
     populateMidiOutputs(outputs);
     el.testDeviceBtn.disabled = false;
+    el.scanDeviceBtn.disabled = false;
     const inputs = state.midi.listInputs();
     log(`${inputs.length} entrée(s) MIDI à l’écoute — presse un pad de l’appareil pour vérifier.`);
     const likely = state.midi.findLikelyEp133Output();
@@ -789,6 +790,50 @@ function testDevice() {
   } catch (error) {
     log(error.message, 'error');
   }
+}
+
+/**
+ * Scanne la mémoire de l'appareil : envoie les requêtes de lecture connues et
+ * capture les réponses SysEx brutes. Le décodage du contenu (liste des sons) se
+ * fait à partir de cette capture — étape indispensable pour la lecture directe.
+ */
+async function scanDevice() {
+  if (!state.midi.getSelectedOutput()) { log('Sélectionne d’abord la sortie MIDI de l’EP-133.', 'warn'); return; }
+
+  const captured = [];
+  const onSysex = event => captured.push(event.detail.data);
+  state.midi.addEventListener('sysex', onSysex);
+  el.scanDeviceBtn.disabled = true;
+  log('Scan de l’appareil : envoi des requêtes de lecture, capture des réponses…');
+
+  try {
+    // Requête d'infos appareil (commande 01) — bénigne, lecture seule.
+    state.midi.send([...buildSysExFrame({ manufacturerId: PROTOCOL.manufacturerId, command: 1, payload: [] })]);
+    await new Promise(r => setTimeout(r, 700));
+    // Initialisation du gestionnaire de fichiers (lecture seule) pour préparer une éventuelle énumération.
+    state.midi.send([...buildSysExFrame({ manufacturerId: PROTOCOL.manufacturerId, command: 5, payload: [0x00, 0x01, 0x01, 0x00, 0x40, 0x00, 0x00] })]);
+    await new Promise(r => setTimeout(r, 1500));
+  } catch (error) {
+    log(`Scan : envoi impossible (${error.message}).`, 'error');
+  } finally {
+    state.midi.removeEventListener('sysex', onSysex);
+    el.scanDeviceBtn.disabled = false;
+  }
+
+  if (!captured.length) {
+    log('Scan terminé : aucune réponse SysEx reçue. L’appareil n’expose peut-être pas ces requêtes, ou une capture MIDI-OX sera nécessaire.', 'warn');
+    return;
+  }
+
+  const total = captured.reduce((sum, msg) => sum + msg.length, 0);
+  const preview = captured[0].slice(0, 32).map(b => b.toString(16).padStart(2, '0')).join(' ');
+  log(`Scan terminé : ${captured.length} réponse(s), ${total} octets. Aperçu : ${preview}…`);
+  log('Ces réponses vont permettre de décoder le contenu. Un fichier de capture a été téléchargé — envoie-le pour activer la lecture directe.');
+
+  // Télécharge la capture brute pour décodage (concatène chaque message séparé par un marqueur).
+  const parts = captured.map(msg => Uint8Array.from(msg));
+  const blob = new Blob(parts, { type: 'application/octet-stream' });
+  downloadBlob(blob, `ep133_scan_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.bin`);
 }
 
 function renderDeviceIdentity(identity) {
@@ -1091,6 +1136,7 @@ function bindEvents() {
   el.uploadBtn.addEventListener('click', upload);
   el.connectMidiBtn.addEventListener('click', connectMidi);
   el.testDeviceBtn.addEventListener('click', testDevice);
+  el.scanDeviceBtn.addEventListener('click', scanDevice);
   el.midiOutputSelect.addEventListener('change', event => {
     state.midi.selectOutput(event.target.value);
     updateDeviceBadge();

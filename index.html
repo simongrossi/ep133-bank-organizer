@@ -39,8 +39,9 @@
           <input id="simulationMode" type="checkbox" checked />
           <span>Mode simulation sécurisé</span>
         </label>
-        <div class="button-row">
+        <div class="button-row wrap">
           <button id="testDeviceBtn" class="button" disabled title="Envoie une requête d’identité MIDI standard et attend la réponse">Tester le matériel</button>
+          <button id="scanDeviceBtn" class="button" disabled title="Interroge la mémoire de l’appareil et capture ce qu’il renvoie">Scanner la mémoire</button>
         </div>
         <div id="deviceInfo" class="device-info" hidden></div>
         <div id="midiActivity" class="midi-activity" hidden>
