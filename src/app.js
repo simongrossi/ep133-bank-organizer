@@ -534,6 +534,45 @@ async function importEpack(file) {
   }
 }
 
+const DEVICE_STORE_KEY = 'ep133-device-snapshot';
+
+/** Sauvegarde un instantané léger de l'appareil (sans l'audio) pour survivre aux rechargements. */
+function persistDevice(device, filename) {
+  try {
+    const snapshot = {
+      filename,
+      savedAt: Date.now(),
+      sounds: device.sounds.map(s => ({ slot: s.slot, name: s.name, bank: s.bank, size: s.size, compressedSize: s.compressedSize, duration: s.duration })),
+      projects: device.projects.map(p => ({ id: p.id, assignedCount: p.assignedCount, groups: p.groups }))
+    };
+    localStorage.setItem(DEVICE_STORE_KEY, JSON.stringify(snapshot));
+  } catch { /* quota dépassé ou stockage indisponible : on ignore */ }
+}
+
+/** Restaure l'instantané appareil. L'audio n'est pas conservé : getBlob invite à réimporter. */
+function restoreDevice() {
+  let snap;
+  try { snap = JSON.parse(localStorage.getItem(DEVICE_STORE_KEY) || 'null'); } catch { return null; }
+  if (!snap?.sounds?.length) return null;
+  const soundBySlot = new Map();
+  const sounds = snap.sounds.map(s => ({
+    ...s,
+    restored: true,
+    async getBlob() { throw new Error('Réimporte le .pak pour écouter ce son (l’audio n’est pas conservé entre les sessions).'); }
+  }));
+  for (const s of sounds) soundBySlot.set(s.slot, s);
+  return { sounds, soundBySlot, projects: snap.projects ?? [], filename: snap.filename, savedAt: snap.savedAt, restored: true };
+}
+
+function applyDevice(device) {
+  state.device = device;
+  state.deviceProject = device.projects[0]?.id ?? null;
+  state.deviceSearch = '';
+  if (el.deviceSearch) el.deviceSearch.value = '';
+  state.deviceOccupied = new Set(device.sounds.map(sound => sound.slot));
+  if (el.blockDeviceSlots) el.blockDeviceSlots.checked = state.useDeviceOccupied;
+}
+
 async function importPak(file) {
   try {
     log(`Lecture de la sauvegarde ${file.name}…`);
@@ -541,16 +580,8 @@ async function importPak(file) {
     if (!device.sounds.length && !device.projects.length) {
       throw new Error('Aucun son ni projet trouvé — ce fichier n’est peut-être pas un backup EP-133.');
     }
-    state.device = device;
-    state.deviceProject = device.projects[0]?.id ?? null;
-    state.deviceSearch = '';
-    el.deviceSearch.value = '';
-
-    // Les slots réellement occupés sur l'appareil deviennent des slots à éviter :
-    // les nouveaux sons se placeront automatiquement dans les trous libres.
-    state.deviceOccupied = new Set(device.sounds.map(sound => sound.slot));
-    if (el.blockDeviceSlots) el.blockDeviceSlots.checked = state.useDeviceOccupied;
-
+    persistDevice(device, file.name);
+    applyDevice(device);
     renderDevice();
     reallocate();
     log(`Sauvegarde chargée : ${device.sounds.length} son(s), ${device.projects.length} projet(s). ${state.deviceOccupied.size} slot(s) occupé(s) sur l’appareil seront évités à l’import.`);
@@ -1103,6 +1134,14 @@ async function init() {
   bindEvents();
   populateMemoryOptions();
   populateChannelOptions();
+
+  // Restaure l'appareil de la dernière session (slots occupés + mémoire), sans l'audio.
+  const restored = restoreDevice();
+  if (restored) {
+    applyDevice(restored);
+    const when = restored.savedAt ? new Date(restored.savedAt).toLocaleDateString('fr-FR') : '';
+    log(`Appareil restauré depuis ${restored.filename ?? 'la dernière session'}${when ? ` (${when})` : ''} : ${restored.sounds.length} son(s), ${restored.deviceOccupied?.size ?? state.deviceOccupied.size} slot(s) occupé(s) pris en compte. Réimporte le .pak pour écouter les sons.`);
+  }
   render();
   renderDevice();
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
