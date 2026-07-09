@@ -23,12 +23,26 @@ const state = {
   deviceProject: null,
   deviceSearch: '',
   playingDeviceSlot: null,
-  midiChannel: 0
+  midiChannel: 0,
+  deviceOccupied: new Set(),   // slots réellement occupés sur l'appareil (via .pak)
+  useDeviceOccupied: true       // bloquer ces slots lors de l'allocation
 };
+
+/**
+ * Slots à éviter lors de l'allocation : saisie manuelle + (option) slots déjà
+ * occupés sur l'appareil d'après la sauvegarde .pak importée.
+ */
+function effectiveOccupied() {
+  const set = new Set(state.occupied);
+  if (state.useDeviceOccupied) {
+    for (const slot of state.deviceOccupied) set.add(slot);
+  }
+  return set;
+}
 
 const el = Object.fromEntries([
   'deviceBadge', 'connectMidiBtn', 'midiOutputSelect', 'simulationMode', 'occupiedSlots',
-  'applyOccupiedBtn', 'loadDemoOccupiedBtn', 'strictMode', 'fallbackUserBanks',
+  'applyOccupiedBtn', 'loadDemoOccupiedBtn', 'blockDeviceSlots', 'strictMode', 'fallbackUserBanks',
   'preferFilenameSlot', 'convertOnExport', 'convertMono', 'normalizeAudio', 'trimSilence',
   'targetSampleRate', 'wavFileInput', 'folderInput', 'epackInput', 'dropZone', 'bankSummary',
   'padBankTabs', 'padGrid',
@@ -51,7 +65,7 @@ function log(message, level = 'info') {
 
 function getOptions() {
   return {
-    occupied: state.occupied,
+    occupied: effectiveOccupied(),
     strict: el.strictMode.checked,
     fallbackUserBanks: el.fallbackUserBanks.checked,
     preferFilenameSlot: el.preferFilenameSlot.checked
@@ -159,7 +173,7 @@ function formatWavInfo(sample) {
 }
 
 function renderBankSummary() {
-  const summaries = summarizeBanks(state.samples, state.occupied);
+  const summaries = summarizeBanks(state.samples, effectiveOccupied());
   el.bankSummary.innerHTML = summaries.map(bank => {
     const usage = Math.min(100, ((bank.occupied + bank.planned) / bank.capacity) * 100);
     return `<article class="bank-card" data-bank="${bank.key}">
@@ -199,6 +213,7 @@ function renderPads() {
   }).join('');
 
   const bank = BANK_BY_KEY[active];
+  const occupied = effectiveOccupied();
   const pads = [];
   for (let slot = bank.start; slot <= bank.end; slot += 1) {
     const sample = planned.get(slot);
@@ -210,7 +225,7 @@ function renderPads() {
         <span class="pad-num">${label}</span>
         <span class="pad-name">${escapeHtml(sample.name)}</span>
       </button>`);
-    } else if (state.occupied.has(slot)) {
+    } else if (occupied.has(slot)) {
       pads.push(`<div class="pad is-occupied" title="${label} · déjà occupé sur l’appareil"><span class="pad-num">${label}</span></div>`);
     } else {
       pads.push(`<div class="pad is-free" title="${label} · libre"><span class="pad-num">${label}</span></div>`);
@@ -224,7 +239,7 @@ function categoryOptions(selected) {
 }
 
 function renderTable() {
-  const planErrors = validatePlan(state.samples, state.occupied, el.strictMode.checked);
+  const planErrors = validatePlan(state.samples, effectiveOccupied(), el.strictMode.checked);
   el.sampleCountLabel.textContent = `${state.samples.length} sample${state.samples.length > 1 ? 's' : ''} · ${planErrors.length} erreur${planErrors.length > 1 ? 's' : ''}`;
 
   if (!state.samples.length) {
@@ -362,7 +377,7 @@ function createManifest() {
 }
 
 function validateBeforeExport() {
-  const errors = validatePlan(state.samples, state.occupied, el.strictMode.checked);
+  const errors = validatePlan(state.samples, effectiveOccupied(), el.strictMode.checked);
   if (errors.length) {
     const unique = [...new Set(errors.map(error => error.message))];
     throw new Error(`Le plan contient ${errors.length} erreur(s) : ${unique.slice(0, 4).join(' / ')}`);
@@ -530,9 +545,15 @@ async function importPak(file) {
     state.deviceProject = device.projects[0]?.id ?? null;
     state.deviceSearch = '';
     el.deviceSearch.value = '';
+
+    // Les slots réellement occupés sur l'appareil deviennent des slots à éviter :
+    // les nouveaux sons se placeront automatiquement dans les trous libres.
+    state.deviceOccupied = new Set(device.sounds.map(sound => sound.slot));
+    if (el.blockDeviceSlots) el.blockDeviceSlots.checked = state.useDeviceOccupied;
+
     renderDevice();
-    renderMemory();
-    log(`Sauvegarde chargée : ${device.sounds.length} son(s), ${device.projects.length} projet(s).`);
+    reallocate();
+    log(`Sauvegarde chargée : ${device.sounds.length} son(s), ${device.projects.length} projet(s). ${state.deviceOccupied.size} slot(s) occupé(s) sur l’appareil seront évités à l’import.`);
   } catch (error) {
     log(`Import .pak impossible : ${error.message}`, 'error');
   }
@@ -957,6 +978,10 @@ function bindEvents() {
   for (const control of [el.strictMode, el.fallbackUserBanks, el.preferFilenameSlot]) {
     control.addEventListener('change', reallocate);
   }
+  el.blockDeviceSlots.addEventListener('change', event => {
+    state.useDeviceOccupied = event.target.checked;
+    reallocate();
+  });
 
   el.sampleTableBody.addEventListener('change', event => {
     const row = event.target.closest('tr[data-id]');
