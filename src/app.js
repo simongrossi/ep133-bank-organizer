@@ -7,7 +7,10 @@ import { createEpack, readEpack, createHandoffBundle } from './pack.js';
 import { parsePak, DEVICE_LAYOUT } from './pak.js';
 import { noteToGroupPad, groupPadToNote, GROUP_LABELS, PAD_LABELS, PAD_DISPLAY_ORDER } from './padmap.js';
 import { MidiManager } from './midi.js';
-import { Ep133Transport, ProtocolNotImplementedError, buildSysExFrame, PROTOCOL } from './transport.js';
+import { deviceSoundAudioStatus } from './device-audio.js';
+import { analyzeDeviceChangeReadiness } from './device-sync.js';
+import { buildInventoryScanRequests, buildMetadataRequestsForSlots, createCaptureRecord, moveDeviceSoundSlot, parseDeviceScanRecords } from './device-scan.js';
+import { Ep133Transport, ProtocolNotImplementedError } from './transport.js';
 import { createId, csvEscape, downloadBlob, formatBytes, sanitizeName } from './utils.js';
 
 const state = {
@@ -24,13 +27,15 @@ const state = {
   deviceSearch: '',
   playingDeviceSlot: null,
   midiChannel: 0,
-  deviceOccupied: new Set(),   // slots réellement occupés sur l'appareil (via .pak)
+  draggingDeviceSlot: null,
+  deviceChanges: [],
+  deviceOccupied: new Set(),   // slots réellement occupés sur l'appareil (.pak ou scan MIDI)
   useDeviceOccupied: true       // bloquer ces slots lors de l'allocation
 };
 
 /**
  * Slots à éviter lors de l'allocation : saisie manuelle + (option) slots déjà
- * occupés sur l'appareil d'après la sauvegarde .pak importée.
+ * occupés sur l'appareil d'après la sauvegarde .pak ou le scan MIDI.
  */
 function effectiveOccupied() {
   const set = new Set(state.occupied);
@@ -52,6 +57,7 @@ const el = Object.fromEntries([
   'memoryCapacity', 'memoryBarFill', 'memoryStats', 'memoryBanks',
   'pakInput', 'deviceEmpty', 'deviceContent', 'deviceSummary', 'deviceBarFill', 'deviceBanks', 'projectSelect',
   'projectPads', 'deviceSearch', 'deviceSounds', 'midiChannel', 'livePads', 'liveStatus',
+  'syncSummary', 'syncHint', 'saveLocalStateBtn', 'applyDeviceChangesBtn',
   'confirmDialog', 'confirmTitle', 'confirmMessage'
 ].map(id => [id, document.getElementById(id)]));
 
@@ -87,6 +93,12 @@ function stopAudio() {
 }
 
 async function previewDeviceSound(sound) {
+  const audio = deviceSoundAudioStatus(sound);
+  if (!audio.playable) {
+    explainDeviceSoundPlayback(sound);
+    return;
+  }
+
   try {
     const blob = await sound.getBlob();
     stopAudio();
@@ -98,6 +110,11 @@ async function previewDeviceSound(sound) {
   } catch (error) {
     log(`Lecture impossible (${sound.name}) : ${error.message}`, 'warn');
   }
+}
+
+function explainDeviceSoundPlayback(sound) {
+  const audio = deviceSoundAudioStatus(sound);
+  log(audio.message, audio.playable ? 'info' : 'warn');
 }
 
 function previewSample(sample) {
@@ -217,18 +234,27 @@ function renderPads() {
   const pads = [];
   for (let slot = bank.start; slot <= bank.end; slot += 1) {
     const sample = planned.get(slot);
+    const deviceSound = state.device?.soundBySlot.get(slot) ?? null;
     const label = String(slot).padStart(3, '0');
     if (sample) {
       const error = sample.formatError || sample.allocationStatus === 'error';
       const playing = sample.id === state.playingSampleId ? ' is-playing' : '';
-      pads.push(`<button class="pad is-planned${error ? ' has-error' : ''}${playing}" data-id="${sample.id}" title="${escapeHtml(`${label} · ${sample.name} — cliquer pour écouter`)}">
+      pads.push(`<button class="pad is-planned${error ? ' has-error' : ''}${playing}" data-id="${sample.id}" data-slot="${slot}" title="${escapeHtml(`${label} · ${sample.name} — cliquer pour écouter`)}">
         <span class="pad-num">${label}</span>
         <span class="pad-name">${escapeHtml(sample.name)}</span>
       </button>`);
     } else if (occupied.has(slot)) {
-      pads.push(`<div class="pad is-occupied" title="${label} · déjà occupé sur l’appareil"><span class="pad-num">${label}</span></div>`);
+      const dragging = slot === state.draggingDeviceSlot ? ' is-dragging' : '';
+      const soundName = deviceSound?.name ?? '';
+      const title = deviceSound
+        ? `${label} · ${soundName} — glisser ou déposer pour déplacer/échanger`
+        : `${label} · déjà occupé sur l’appareil`;
+      pads.push(`<div class="pad is-occupied${dragging}" data-slot="${slot}" ${deviceSound ? 'draggable="true"' : ''} title="${escapeHtml(title)}">
+        <span class="pad-num">${label}</span>
+        ${soundName ? `<span class="pad-name">${escapeHtml(soundName)}</span>` : ''}
+      </div>`);
     } else {
-      pads.push(`<div class="pad is-free" title="${label} · libre"><span class="pad-num">${label}</span></div>`);
+      pads.push(`<div class="pad is-free" data-slot="${slot}" title="${label} · libre"><span class="pad-num">${label}</span></div>`);
     }
   }
   el.padGrid.innerHTML = pads.join('');
@@ -278,26 +304,30 @@ function currentConversion() {
   };
 }
 
-function renderMemory() {
-  const capacity = EP133_MEMORY_OPTIONS.find(option => option.key === state.memoryKey) ?? EP133_MEMORY_OPTIONS[0];
-  const summary = summarizeMemory(state.samples, { capacityBytes: capacity.bytes, conversion: currentConversion() });
+function currentCapacityBytes() {
+  return state.device?.memory?.capacityBytes
+    || (EP133_MEMORY_OPTIONS.find(option => option.key === state.memoryKey) ?? EP133_MEMORY_OPTIONS[0]).bytes;
+}
 
-  // Si une sauvegarde .pak est chargée, on part de l'occupation réelle de
-  // l'appareil : le plan d'import s'ajoute par-dessus.
+function renderMemory() {
+  const capacityBytes = currentCapacityBytes();
+  const summary = summarizeMemory(state.samples, { capacityBytes, conversion: currentConversion() });
+
+  // Si un appareil est connu (.pak ou scan MIDI), le plan d'import s'ajoute par-dessus.
   const deviceBytes = state.device ? state.device.sounds.reduce((sum, sound) => sum + sound.size, 0) : 0;
   const combined = deviceBytes + summary.totalBytes;
-  const usedRatio = capacity.bytes > 0 ? Math.min(1, combined / capacity.bytes) : 0;
-  const over = combined > capacity.bytes;
+  const usedRatio = capacityBytes > 0 ? Math.min(1, combined / capacityBytes) : 0;
+  const over = combined > capacityBytes;
 
   el.memoryBarFill.style.width = `${Math.round(usedRatio * 100)}%`;
   el.memoryBarFill.classList.toggle('is-over', over);
 
   const percent = (usedRatio * 100).toFixed(usedRatio >= 0.1 ? 0 : 1);
   el.memoryStats.innerHTML = [
-    `<span><b>${formatBytes(combined)}</b> / ${formatBytes(capacity.bytes)} <small class="${over ? 'stat-over' : 'muted'}">(${percent}%${over ? ' — dépassement !' : ''})</small></span>`,
+    `<span><b>${formatBytes(combined)}</b> / ${formatBytes(capacityBytes)} <small class="${over ? 'stat-over' : 'muted'}">(${percent}%${over ? ' — dépassement !' : ''})</small></span>`,
     deviceBytes ? `<span><b>${formatBytes(deviceBytes)}</b> déjà sur l’appareil</span>` : '',
     `<span><b>${summary.count}</b> sample(s) à importer (${formatBytes(summary.totalBytes)})</span>`,
-    `<span><b>${formatBytes(Math.max(0, capacity.bytes - combined))}</b> resteront libres</span>`,
+    `<span><b>${formatBytes(Math.max(0, capacityBytes - combined))}</b> resteront libres</span>`,
     `<span>≈ <b>${formatDuration(summary.totalDuration)}</b> d’audio à importer</span>`
   ].filter(Boolean).join('');
 
@@ -309,6 +339,47 @@ function renderMemory() {
       <div class="bank-progress"><span style="width:${Math.round((bank.bytes / maxBank) * 100)}%"></span></div>
     </div>
   `).join('');
+}
+
+function slotLabel(slot) {
+  return String(slot).padStart(3, '0');
+}
+
+function renderSyncActions() {
+  if (!el.syncSummary) return;
+  const changeReadiness = analyzeDeviceChangeReadiness(state.deviceChanges);
+  const sampleCount = state.samples.length;
+
+  if (changeReadiness.count) {
+    el.syncSummary.textContent = `${changeReadiness.count} déplacement(s) local(aux) en attente d’application sur la machine.`;
+  } else if (sampleCount) {
+    el.syncSummary.textContent = `${sampleCount} nouveau(x) sample(s) prêt(s) à exporter ou envoyer.`;
+  } else if (state.device) {
+    el.syncSummary.textContent = 'État appareil chargé. Les prochains glisser-déposer apparaîtront ici.';
+  } else {
+    el.syncSummary.textContent = 'Aucun changement à envoyer pour l’instant.';
+  }
+
+  const blockers = [];
+  if (changeReadiness.missingAudio.length) blockers.push('importe un .pak pour fournir l’audio des sons déplacés');
+  if (changeReadiness.targetOutsideUser.length) blockers.push('la cible doit rester dans USER 700–899 en mode sécurisé');
+  if (changeReadiness.deleteOutsideUser.length) blockers.push('la source à supprimer doit aussi être dans USER 700–899');
+
+  el.syncHint.textContent = changeReadiness.count
+    ? (blockers.length
+      ? `Application bloquée : ${blockers.join(' · ')}.`
+      : 'Prêt : ces déplacements peuvent être appliqués en mode simulation ou en écriture réelle confirmée.')
+    : 'Les déplacements faits par glisser-déposer restent locaux tant qu’ils ne sont pas appliqués.';
+
+  el.saveLocalStateBtn.disabled = !state.device;
+  el.applyDeviceChangesBtn.disabled = !changeReadiness.count;
+  el.applyDeviceChangesBtn.title = changeReadiness.count
+    ? 'Vérifie puis applique les déplacements locaux à la machine quand c’est possible'
+    : 'Déplace d’abord un son entre deux slots';
+  el.uploadBtn.disabled = !sampleCount;
+  el.uploadBtn.title = sampleCount
+    ? 'Envoie le plan d’import vers l’EP-133 (simulation par défaut)'
+    : 'Ajoute des WAV au plan d’import pour activer cet envoi';
 }
 
 function render() {
@@ -323,6 +394,7 @@ function render() {
   el.exportPackBtn.disabled = !hasSamples;
   el.exportHandoffBtn.disabled = !hasSamples;
   el.uploadBtn.disabled = !hasSamples;
+  renderSyncActions();
 }
 
 function escapeHtml(value) {
@@ -542,7 +614,18 @@ function persistDevice(device, filename) {
     const snapshot = {
       filename,
       savedAt: Date.now(),
-      sounds: device.sounds.map(s => ({ slot: s.slot, name: s.name, bank: s.bank, size: s.size, compressedSize: s.compressedSize, duration: s.duration })),
+      source: device.source ?? 'pak',
+      memory: device.memory ?? null,
+      deviceInfo: device.deviceInfo ?? null,
+      sounds: device.sounds.map(s => ({
+        slot: s.slot,
+        name: s.name,
+        bank: s.bank,
+        size: s.size,
+        compressedSize: s.compressedSize,
+        duration: s.duration,
+        scanOnly: Boolean(s.scanOnly)
+      })),
       projects: device.projects.map(p => ({ id: p.id, assignedCount: p.assignedCount, groups: p.groups }))
     };
     localStorage.setItem(DEVICE_STORE_KEY, JSON.stringify(snapshot));
@@ -557,20 +640,227 @@ function restoreDevice() {
   const soundBySlot = new Map();
   const sounds = snap.sounds.map(s => ({
     ...s,
+    scanOnly: Boolean(s.scanOnly || snap.source === 'midi-scan'),
     restored: true,
-    async getBlob() { throw new Error('Réimporte le .pak pour écouter ce son (l’audio n’est pas conservé entre les sessions).'); }
+    async getBlob() { throw new Error('Audio non conservé entre les sessions. Réimporte un .pak pour écouter ce son.'); }
   }));
   for (const s of sounds) soundBySlot.set(s.slot, s);
-  return { sounds, soundBySlot, projects: snap.projects ?? [], filename: snap.filename, savedAt: snap.savedAt, restored: true };
+  return {
+    sounds,
+    soundBySlot,
+    projects: snap.projects ?? [],
+    filename: snap.filename,
+    savedAt: snap.savedAt,
+    source: snap.source ?? 'pak',
+    memory: snap.memory ?? null,
+    deviceInfo: snap.deviceInfo ?? null,
+    restored: true
+  };
 }
 
 function applyDevice(device) {
   state.device = device;
   state.deviceProject = device.projects[0]?.id ?? null;
   state.deviceSearch = '';
+  state.deviceChanges = [];
   if (el.deviceSearch) el.deviceSearch.value = '';
   state.deviceOccupied = new Set(device.sounds.map(sound => sound.slot));
   if (el.blockDeviceSlots) el.blockDeviceSlots.checked = state.useDeviceOccupied;
+}
+
+function clearDropHovers() {
+  document.querySelectorAll('.is-drop-hover').forEach(node => node.classList.remove('is-drop-hover'));
+}
+
+function clearSlotDropState() {
+  clearDropHovers();
+  document.querySelectorAll('.is-dragging').forEach(node => node.classList.remove('is-dragging'));
+}
+
+function slotFromDragEvent(event) {
+  const raw = event.dataTransfer?.getData('text/x-ep133-slot')
+    || event.dataTransfer?.getData('text/plain')
+    || state.draggingDeviceSlot;
+  const slot = Number(raw);
+  return Number.isInteger(slot) ? slot : null;
+}
+
+function isDeviceSlotDrag(event) {
+  return state.draggingDeviceSlot != null || [...(event.dataTransfer?.types ?? [])].includes('text/x-ep133-slot');
+}
+
+function startDeviceSlotDrag(event, slot) {
+  if (!state.device?.soundBySlot.get(slot)) return;
+  state.draggingDeviceSlot = slot;
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/x-ep133-slot', String(slot));
+    event.dataTransfer.setData('text/plain', String(slot));
+  }
+  event.target.closest('[data-slot]')?.classList.add('is-dragging');
+}
+
+function recordDeviceSlotChange(result) {
+  const addChange = (sound, fromSlot, toSlot, swapped) => {
+    if (!sound) return;
+    state.deviceChanges.push({
+      id: createId(),
+      fromSlot,
+      toSlot,
+      swapped,
+      soundName: sound.name,
+      hasAudio: deviceSoundAudioStatus(sound).playable
+    });
+  };
+
+  addChange(result.sound, result.fromSlot, result.toSlot, result.swapped);
+  if (result.swapped) addChange(result.targetSound, result.toSlot, result.fromSlot, true);
+}
+
+function acceptDeviceSlotDrop(event, targetSlot) {
+  const fromSlot = slotFromDragEvent(event);
+  if (!fromSlot || !targetSlot || fromSlot === targetSlot) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const result = moveDeviceSoundSlot(state.device, fromSlot, targetSlot);
+  if (!result.ok) {
+    log('Déplacement impossible : le slot source n’existe plus dans l’inventaire.', 'warn');
+    state.draggingDeviceSlot = null;
+    clearSlotDropState();
+    return;
+  }
+
+  if (state.playingDeviceSlot === result.fromSlot) state.playingDeviceSlot = result.toSlot;
+  else if (result.swapped && state.playingDeviceSlot === result.toSlot) state.playingDeviceSlot = result.fromSlot;
+
+  recordDeviceSlotChange(result);
+  state.deviceOccupied = new Set(state.device.sounds.map(sound => sound.slot));
+  persistDevice(state.device, state.device.filename ?? 'réorganisation locale');
+  state.draggingDeviceSlot = null;
+  clearSlotDropState();
+  renderDevice();
+  reallocate();
+
+  const fromLabel = String(result.fromSlot).padStart(3, '0');
+  const toLabel = String(result.toSlot).padStart(3, '0');
+  const action = result.swapped ? `slots ${fromLabel} et ${toLabel} échangés` : `${fromLabel} déplacé vers ${toLabel}`;
+  log(`Réorganisation locale : ${action}. Utilise « Appliquer les déplacements » pour vérifier si l’écriture machine est possible.`);
+}
+
+function saveLocalState() {
+  if (!state.device) {
+    log('Aucun état appareil à sauvegarder pour l’instant.', 'warn');
+    return;
+  }
+  persistDevice(state.device, state.device.filename ?? 'réorganisation locale');
+  log('État local sauvegardé dans le navigateur. La machine n’a pas été modifiée.');
+  renderSyncActions();
+}
+
+function explainDeviceChangeBlockers(readiness) {
+  if (!readiness.count) {
+    log('Aucun déplacement local à appliquer.', 'warn');
+    return;
+  }
+
+  if (readiness.missingAudio.length) {
+    const examples = readiness.missingAudio.slice(0, 3).map(change => `${slotLabel(change.fromSlot)}→${slotLabel(change.toSlot)}`).join(', ');
+    log(`Application impossible pour ${readiness.missingAudio.length} déplacement(s) (${examples}) : le scan MIDI ne contient pas l’audio. Importe un .pak pour fournir les WAV source.`, 'warn');
+  }
+  if (readiness.targetOutsideUser.length) {
+    const examples = readiness.targetOutsideUser.slice(0, 3).map(change => slotLabel(change.toSlot)).join(', ');
+    log(`Application bloquée : cible(s) hors USER 700–899 (${examples}). L’écriture matérielle reste volontairement limitée aux banques USER.`, 'warn');
+  }
+  if (readiness.deleteOutsideUser.length) {
+    const examples = readiness.deleteOutsideUser.slice(0, 3).map(change => slotLabel(change.fromSlot)).join(', ');
+    log(`Application exacte bloquée : il faudrait supprimer une source hors USER 700–899 (${examples}). Le déplacement reste local pour éviter d’effacer une banque système.`, 'warn');
+  }
+}
+
+async function uploadDeviceChangeSounds(changes, simulation) {
+  const uploadSamples = [];
+  for (const change of changes) {
+    const sound = state.device?.soundBySlot.get(change.toSlot);
+    if (!sound) throw new Error(`Le slot cible ${slotLabel(change.toSlot)} n’existe plus dans l’état local.`);
+    const wavBlob = await sound.getBlob();
+    const sample = {
+      name: sound.name,
+      slot: change.toSlot,
+      file: wavBlob,
+      channels: sound.channels ?? 1
+    };
+    if (!simulation) {
+      sample.audioBlob = await convertWavToRawPcm(wavBlob, {
+        targetSampleRate: EP133_TARGET_SAMPLE_RATE,
+        mono: true,
+        normalize: el.normalizeAudio.checked,
+        trimSilence: el.trimSilence.checked
+      });
+    }
+    uploadSamples.push(sample);
+  }
+  return uploadSamples;
+}
+
+async function applyDeviceChanges() {
+  const readiness = analyzeDeviceChangeReadiness(state.deviceChanges);
+  if (!readiness.exactWritable) {
+    explainDeviceChangeBlockers(readiness);
+    renderSyncActions();
+    return;
+  }
+
+  const simulation = el.simulationMode.checked;
+  if (!simulation && !state.midi.getSelectedOutput()) {
+    log('Sélectionne d’abord une sortie MIDI pour appliquer les déplacements sur l’EP-133.', 'warn');
+    return;
+  }
+
+  const confirmed = await confirmAction(
+    simulation ? 'Simuler les déplacements ?' : 'Appliquer les déplacements sur l’EP-133 ?',
+    simulation
+      ? `${readiness.count} déplacement(s) seront simulés, sans modifier la machine.`
+      : `${readiness.count} déplacement(s) vont être écrits dans USER 700–899. Les sources USER remplacées seront supprimées quand nécessaire.`
+  );
+  if (!confirmed) return;
+
+  const previousText = el.applyDeviceChangesBtn.textContent;
+  try {
+    el.applyDeviceChangesBtn.disabled = true;
+    el.applyDeviceChangesBtn.textContent = simulation ? 'Simulation…' : 'Application…';
+    const transport = new Ep133Transport(state.midi, {
+      simulation,
+      unlockWrite: !simulation,
+      allowAllBanks: false,
+      logger: message => log(message)
+    });
+
+    const samples = await uploadDeviceChangeSounds(readiness.pending, simulation);
+    await transport.uploadBatch(samples, ({ index, total, sample }) => {
+      el.applyDeviceChangesBtn.textContent = `${index}/${total} · ${slotLabel(sample.slot)}`;
+    });
+
+    if (!simulation) {
+      const deletions = readiness.pending.filter(change => !change.swapped).map(change => change.fromSlot);
+      for (const slot of deletions) {
+        await transport.deleteSlot(slot);
+        await new Promise(resolve => setTimeout(resolve, 40));
+      }
+      state.deviceChanges = [];
+      persistDevice(state.device, state.device.filename ?? 'réorganisation appliquée');
+      log('Déplacements appliqués sur l’EP-133 en mode sécurisé USER.');
+    } else {
+      log('Simulation terminée : les déplacements restent locaux tant que le mode simulation est actif.');
+    }
+  } catch (error) {
+    if (error instanceof ProtocolNotImplementedError) log(error.message, 'warn');
+    else log(`Application impossible : ${error.message}`, 'error');
+  } finally {
+    el.applyDeviceChangesBtn.textContent = previousText;
+    renderDevice();
+    renderSyncActions();
+  }
 }
 
 async function importPak(file) {
@@ -598,21 +888,22 @@ function renderDevice() {
     const midiReady = Boolean(state.midi.access);
     el.deviceEmpty.classList.toggle('is-midi-connected', midiReady);
     el.deviceEmpty.innerHTML = midiReady
-      ? `<p><strong>MIDI connecté, stats appareil incomplètes.</strong></p>
-        <p>Le MIDI standard ne donne pas la liste des sons ni l’occupation mémoire. Importe une sauvegarde <code>.pak</code> exportée depuis l’EP Sample Tool officiel pour compléter les stats.</p>`
-      : '<p>Aucune sauvegarde chargée. Exporte un backup depuis l’EP Sample Tool officiel, puis importe le fichier <code>.pak</code> ici.</p>';
+      ? `<p><strong>MIDI connecté, contenu pas encore lu.</strong></p>
+        <p>Clique <code>Scanner la mémoire</code> pour lire les slots et les stats depuis l’EP-133, ou importe un <code>.pak</code> pour aussi écouter les sons et voir les projets.</p>`
+      : '<p>Aucune donnée appareil chargée. Connecte le MIDI puis scanne la mémoire, ou importe un backup <code>.pak</code>.</p>';
     return;
   }
   el.deviceEmpty.classList.remove('is-midi-connected');
 
-  const capacity = (EP133_MEMORY_OPTIONS.find(option => option.key === state.memoryKey) ?? EP133_MEMORY_OPTIONS[0]).bytes;
+  const capacity = currentCapacityBytes();
   const totalBytes = device.sounds.reduce((sum, sound) => sum + sound.size, 0);
   const totalDuration = device.sounds.reduce((sum, sound) => sum + sound.duration, 0);
   const usedRatio = capacity > 0 ? Math.min(1, totalBytes / capacity) : 0;
   const percent = (usedRatio * 100).toFixed(usedRatio >= 0.1 ? 0 : 1);
+  const projectLabel = device.projects.length ? `${device.projects.length} projet(s)` : (device.source === 'midi-scan' ? 'projets non lus' : '0 projet');
 
   el.deviceSummary.innerHTML = [
-    `<span><b>${device.sounds.length}</b> son(s) · <b>${device.projects.length}</b> projet(s)</span>`,
+    `<span><b>${device.sounds.length}</b> son(s) · ${projectLabel}</span>`,
     `<span><b>${formatBytes(totalBytes)}</b> / ${formatBytes(capacity)} <small class="${totalBytes > capacity ? 'stat-over' : 'muted'}">(${percent}%)</small></span>`,
     `<span><b>${formatBytes(Math.max(0, capacity - totalBytes))}</b> restants</span>`,
     `<span>≈ <b>${formatDuration(totalDuration)}</b> d’audio</span>`
@@ -642,6 +933,7 @@ function renderDevice() {
   renderProjectPads();
   renderDeviceSounds();
   renderLivePads();
+  renderSyncActions();
 }
 
 function renderProjectPads() {
@@ -727,11 +1019,14 @@ function renderDeviceSounds() {
 
   el.deviceSounds.innerHTML = sounds.map(sound => {
     const playing = sound.slot === state.playingDeviceSlot ? ' is-playing' : '';
-    return `<div class="dsound${playing}" data-slot="${sound.slot}">
-      <button class="button ds-play" data-action="play" title="Écouter">▶</button>
+    const dragging = sound.slot === state.draggingDeviceSlot ? ' is-dragging' : '';
+    const audio = deviceSoundAudioStatus(sound);
+    const unavailable = audio.playable ? '' : ' is-unplayable';
+    return `<div class="dsound${playing}${dragging}${unavailable}" data-slot="${sound.slot}" draggable="true" title="${escapeHtml(`Glisser ${String(sound.slot).padStart(3, '0')} vers un autre slot pour déplacer ou échanger`)}">
+      <button class="button ds-play${audio.playable ? '' : ' is-unavailable'}" data-action="${audio.playable ? 'play' : 'explain'}" title="${escapeHtml(audio.playable ? 'Écouter' : audio.message)}">${audio.playable ? '▶' : 'i'}</button>
       <span class="ds-slot">${String(sound.slot).padStart(3, '0')}</span>
       <span class="ds-name">${escapeHtml(sound.name)}</span>
-      <span class="ds-size">${formatBytes(sound.size)} · ${sound.duration.toFixed(2)} s</span>
+      <span class="ds-size">${formatBytes(sound.size)} · ${sound.duration.toFixed(2)} s${audio.playable ? '' : ` · <small>${escapeHtml(audio.label)}</small>`}</span>
       <span class="ds-bank">${sound.bank ?? ''}</span>
     </div>`;
   }).join('');
@@ -758,7 +1053,7 @@ async function connectMidi() {
     renderLivePads();
     renderDevice();
     if (!state.device) {
-      log('Note : le MIDI ne permet pas de lire le contenu de la machine (protocole propriétaire). Pour compléter les stats, importe une sauvegarde .pak exportée depuis l’EP Sample Tool officiel.', 'warn');
+      log('MIDI prêt. Clique « Scanner la mémoire » pour lire les slots et les stats directement depuis l’EP-133.');
     }
   } catch (error) {
     log(error.message, 'error');
@@ -798,42 +1093,144 @@ function testDevice() {
  * fait à partir de cette capture — étape indispensable pour la lecture directe.
  */
 async function scanDevice() {
-  if (!state.midi.getSelectedOutput()) { log('Sélectionne d’abord la sortie MIDI de l’EP-133.', 'warn'); return; }
+  const output = state.midi.getSelectedOutput();
+  if (!output) { log('Sélectionne d’abord la sortie MIDI de l’EP-133.', 'warn'); return; }
 
-  const captured = [];
-  const onSysex = event => captured.push(event.detail.data);
+  const portInfo = port => port ? {
+    id: port.id,
+    name: port.name || '',
+    manufacturer: port.manufacturer || '',
+    state: port.state || '',
+    connection: port.connection || ''
+  } : null;
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  const inputs = state.midi.listInputs();
+  const records = [];
+  const validResponses = [];
+  const invalidResponses = [];
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+
+  const onSysex = event => {
+    const bytes = Uint8Array.from(event.detail.data);
+    const record = createCaptureRecord({
+      direction: 'in',
+      label: 'response',
+      bytes,
+      source: event.detail.input ?? null
+    });
+    records.push(record);
+    if (record.validSysEx) validResponses.push(bytes);
+    else invalidResponses.push(record);
+  };
+
+  const sendRequests = async (requests, { delayMs = 28 } = {}) => {
+    for (const request of requests) {
+      const frame = Uint8Array.from(request.frame);
+      records.push(createCaptureRecord({
+        direction: 'out',
+        label: request.label,
+        description: request.description,
+        bytes: frame,
+        source: portInfo(output)
+      }));
+      state.midi.send([...frame]);
+      const wait = request.label === 'greet' ? 450 : request.label === 'file-manager-init' ? 220 : delayMs;
+      await sleep(wait);
+    }
+  };
+
   state.midi.addEventListener('sysex', onSysex);
   el.scanDeviceBtn.disabled = true;
-  log('Scan de l’appareil : envoi des requêtes de lecture, capture des réponses…');
+  const previousScanLabel = el.scanDeviceBtn.textContent;
+  el.scanDeviceBtn.textContent = 'Scan en cours…';
+  log(`Scan de l’appareil : sortie ${output.name || output.id}, ${inputs.length} entrée(s) écoutée(s).`);
+  log('Inventaire MIDI complet : lecture des infos de slots 001–999. Ça peut prendre environ 30 à 60 s.');
 
   try {
-    // Requête d'infos appareil (commande 01) — bénigne, lecture seule.
-    state.midi.send([...buildSysExFrame({ manufacturerId: PROTOCOL.manufacturerId, command: 1, payload: [] })]);
-    await new Promise(r => setTimeout(r, 700));
-    // Initialisation du gestionnaire de fichiers (lecture seule) pour préparer une éventuelle énumération.
-    state.midi.send([...buildSysExFrame({ manufacturerId: PROTOCOL.manufacturerId, command: 5, payload: [0x00, 0x01, 0x01, 0x00, 0x40, 0x00, 0x00] })]);
-    await new Promise(r => setTimeout(r, 1500));
+    const inventoryRequests = buildInventoryScanRequests();
+    await sendRequests(inventoryRequests, { delayMs: 28 });
+    await sleep(1500);
+
+    const firstPass = parseDeviceScanRecords(records);
+    const foundSlots = firstPass.device.sounds.map(sound => sound.slot);
+    if (foundSlots.length) {
+      log(`${foundSlots.length} slot(s) occupé(s) détecté(s). Lecture des noms et métadonnées…`);
+      await sendRequests(buildMetadataRequestsForSlots(foundSlots), { delayMs: 55 });
+      await sleep(1500);
+    } else {
+      log('Aucun slot occupé détecté pendant l’inventaire.', 'warn');
+    }
+
+    const parsed = parseDeviceScanRecords(records);
+    if (parsed.device.sounds.length) {
+      persistDevice(parsed.device, `scan MIDI ${stamp}`);
+      applyDevice(parsed.device);
+      renderDevice();
+      reallocate();
+      const totalBytes = parsed.device.sounds.reduce((sum, sound) => sum + sound.size, 0);
+      log(`Mémoire lue directement : ${parsed.device.sounds.length} son(s), ${formatBytes(totalBytes)} détectés sur l’EP-133.`);
+      if (parsed.memory?.freeBytes != null) {
+        log(`Mémoire annoncée par l’appareil : ${formatBytes(parsed.memory.usedBytes)} utilisés / ${formatBytes(parsed.memory.capacityBytes)}.`);
+      }
+    }
   } catch (error) {
     log(`Scan : envoi impossible (${error.message}).`, 'error');
   } finally {
     state.midi.removeEventListener('sysex', onSysex);
     el.scanDeviceBtn.disabled = false;
+    el.scanDeviceBtn.textContent = previousScanLabel;
   }
 
-  if (!captured.length) {
-    log('Scan terminé : aucune réponse SysEx reçue. L’appareil n’expose peut-être pas ces requêtes, ou une capture MIDI-OX sera nécessaire.', 'warn');
-    return;
+  const inboundRecords = records.filter(record => record.direction === 'in');
+  const outboundRecords = records.filter(record => record.direction === 'out');
+  const validBytes = validResponses.reduce((sum, msg) => sum + msg.length, 0);
+  const invalidSources = [...new Set(invalidResponses.map(record => record.source?.name || record.source?.id || 'entrée inconnue'))];
+  const validSources = [...new Set(inboundRecords.filter(record => record.validSysEx).map(record => record.source?.name || record.source?.id || 'entrée inconnue'))];
+  const parsed = parseDeviceScanRecords(records);
+
+  const diagnostic = {
+    format: 'ep133-scan-capture',
+    version: 3,
+    createdAt: new Date().toISOString(),
+    selectedOutput: portInfo(output),
+    inputs,
+    requestCount: outboundRecords.length,
+    inboundCount: inboundRecords.length,
+    validResponseCount: validResponses.length,
+    validResponseBytes: validBytes,
+    invalidResponseCount: invalidResponses.length,
+    parsed: {
+      soundCount: parsed.device.sounds.length,
+      sounds: parsed.device.sounds.map(({ slot, name, bank, size, duration, filename, samplerate, channels }) => ({ slot, name, bank, size, duration, filename, samplerate, channels })),
+      memory: parsed.memory,
+      deviceInfo: parsed.deviceInfo,
+      errors: parsed.errors
+    },
+    records
+  };
+
+  const needsDiagnostic = !parsed.device.sounds.length || invalidResponses.length || !validResponses.length;
+  if (needsDiagnostic) {
+    downloadBlob(
+      new Blob([JSON.stringify(diagnostic, null, 2)], { type: 'application/json;charset=utf-8' }),
+      `ep133_scan_${stamp}.json`
+    );
   }
 
-  const total = captured.reduce((sum, msg) => sum + msg.length, 0);
-  const preview = captured[0].slice(0, 32).map(b => b.toString(16).padStart(2, '0')).join(' ');
-  log(`Scan terminé : ${captured.length} réponse(s), ${total} octets. Aperçu : ${preview}…`);
-  log('Ces réponses vont permettre de décoder le contenu. Un fichier de capture a été téléchargé — envoie-le pour activer la lecture directe.');
-
-  // Télécharge la capture brute pour décodage (concatène chaque message séparé par un marqueur).
-  const parts = captured.map(msg => Uint8Array.from(msg));
-  const blob = new Blob(parts, { type: 'application/octet-stream' });
-  downloadBlob(blob, `ep133_scan_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.bin`);
+  if (validResponses.length && parsed.device.sounds.length) {
+    log(`Scan terminé : ${validResponses.length} réponse(s) SysEx valide(s), ${formatBytes(validBytes)}. Source(s) : ${validSources.join(', ')}.`);
+    log('Scan appliqué dans l’app. Aucun fichier de capture téléchargé.');
+  } else if (validResponses.length) {
+    log(`Scan terminé : ${validResponses.length} réponse(s) SysEx valide(s), ${formatBytes(validBytes)}, mais aucun son décodable. Diagnostic .json téléchargé.`, 'warn');
+  } else if (invalidResponses.length) {
+    const first = invalidResponses[0];
+    log(`Scan terminé : ${invalidResponses.length} réponse(s) SysEx invalides depuis ${invalidSources.join(', ')}. Diagnostic .json téléchargé.`, 'warn');
+    log(`Premier message invalide : ${first.hex}. Vérifie que l’entrée MIDI écoutée est bien l’EP-133 et pas un port loopback/mock.`, 'warn');
+    log('Envoie le .json si tu veux que je voie la source exacte et les octets capturés.');
+  } else {
+    log('Scan terminé : aucune réponse SysEx reçue. Le .json contient les requêtes envoyées et la liste des ports MIDI.', 'warn');
+  }
 }
 
 function renderDeviceIdentity(identity) {
@@ -1022,7 +1419,44 @@ function bindEvents() {
     const row = event.target.closest('.dsound[data-slot]');
     if (!row) return;
     const sound = state.device?.soundBySlot.get(Number(row.dataset.slot));
-    if (sound) previewDeviceSound(sound);
+    if (!sound) return;
+    const button = event.target.closest('button[data-action]');
+    if (button?.dataset.action === 'explain') {
+      explainDeviceSoundPlayback(sound);
+      return;
+    }
+    if (button?.dataset.action === 'play' || deviceSoundAudioStatus(sound).playable) {
+      previewDeviceSound(sound);
+      return;
+    }
+    explainDeviceSoundPlayback(sound);
+  });
+  el.deviceSounds.addEventListener('dragstart', event => {
+    const row = event.target.closest('.dsound[data-slot]');
+    if (!row) return;
+    startDeviceSlotDrag(event, Number(row.dataset.slot));
+  });
+  el.deviceSounds.addEventListener('dragover', event => {
+    const row = event.target.closest('.dsound[data-slot]');
+    if (!row || !isDeviceSlotDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    clearDropHovers();
+    row.classList.add('is-drop-hover');
+  });
+  el.deviceSounds.addEventListener('drop', event => {
+    const row = event.target.closest('.dsound[data-slot]');
+    if (!row) return;
+    acceptDeviceSlotDrop(event, Number(row.dataset.slot));
+  });
+  el.deviceSounds.addEventListener('dragleave', event => {
+    if (!el.deviceSounds.contains(event.relatedTarget)) clearDropHovers();
+  });
+  el.deviceSounds.addEventListener('dragend', () => {
+    state.draggingDeviceSlot = null;
+    clearSlotDropState();
+    renderDeviceSounds();
+    renderPads();
   });
 
   for (const eventName of ['dragenter', 'dragover']) {
@@ -1110,6 +1544,33 @@ function bindEvents() {
     const sample = state.samples.find(item => item.id === pad.dataset.id);
     if (sample) previewSample(sample);
   });
+  el.padGrid.addEventListener('dragstart', event => {
+    const pad = event.target.closest('.pad.is-occupied[data-slot]');
+    if (!pad) return;
+    startDeviceSlotDrag(event, Number(pad.dataset.slot));
+  });
+  el.padGrid.addEventListener('dragover', event => {
+    const pad = event.target.closest('.pad[data-slot]');
+    if (!pad || !isDeviceSlotDrag(event)) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+    clearDropHovers();
+    pad.classList.add('is-drop-hover');
+  });
+  el.padGrid.addEventListener('drop', event => {
+    const pad = event.target.closest('.pad[data-slot]');
+    if (!pad) return;
+    acceptDeviceSlotDrop(event, Number(pad.dataset.slot));
+  });
+  el.padGrid.addEventListener('dragleave', event => {
+    if (!el.padGrid.contains(event.relatedTarget)) clearDropHovers();
+  });
+  el.padGrid.addEventListener('dragend', () => {
+    state.draggingDeviceSlot = null;
+    clearSlotDropState();
+    renderDeviceSounds();
+    renderPads();
+  });
 
   state.audio.addEventListener('ended', () => {
     state.playingSampleId = null;
@@ -1134,6 +1595,8 @@ function bindEvents() {
   el.exportHandoffBtn.addEventListener('click', exportHandoff);
   el.exportSysexBtn.addEventListener('click', exportSysex);
   el.uploadBtn.addEventListener('click', upload);
+  el.saveLocalStateBtn.addEventListener('click', saveLocalState);
+  el.applyDeviceChangesBtn.addEventListener('click', applyDeviceChanges);
   el.connectMidiBtn.addEventListener('click', connectMidi);
   el.testDeviceBtn.addEventListener('click', testDevice);
   el.scanDeviceBtn.addEventListener('click', scanDevice);

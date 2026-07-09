@@ -61,22 +61,28 @@ export class MidiManager extends EventTarget {
     for (const input of this.access.inputs.values()) {
       if (this.boundInputs.has(input.id)) continue;
       this.boundInputs.add(input.id);
-      input.onmidimessage = event => this.#handleMessage(event);
+      input.onmidimessage = event => this.#handleMessage(event, input);
     }
   }
 
-  #handleMessage(event) {
+  #handleMessage(event, input = null) {
     const bytes = event.data;
+    const inputInfo = input ? {
+      id: input.id,
+      name: input.name || 'Entree MIDI sans nom',
+      manufacturer: input.manufacturer || '',
+      state: input.state
+    } : null;
     const identity = parseIdentityReply(bytes);
     if (identity) {
       this.identity = identity;
-      this.dispatchEvent(new CustomEvent('identity', { detail: identity }));
+      this.dispatchEvent(new CustomEvent('identity', { detail: { ...identity, input: inputInfo } }));
       return;
     }
     // Réponse SysEx propriétaire (F0 … F7) : on la transmet telle quelle pour
     // le scan de l'appareil (lecture de la mémoire).
     if (bytes[0] === 0xf0) {
-      this.dispatchEvent(new CustomEvent('sysex', { detail: { data: [...bytes] } }));
+      this.dispatchEvent(new CustomEvent('sysex', { detail: { data: [...bytes], input: inputInfo, timeStamp: event.timeStamp } }));
       return;
     }
     // Activité « live » : notes et autres messages courts, pour voir le matériel réagir.
@@ -87,7 +93,7 @@ export class MidiManager extends EventTarget {
       : status === 0xb0 ? 'cc'
       : 'other';
     this.dispatchEvent(new CustomEvent('activity', {
-      detail: { kind, channel, data: [...bytes], note: bytes[1], velocity: bytes[2] }
+      detail: { kind, channel, data: [...bytes], note: bytes[1], velocity: bytes[2], input: inputInfo }
     }));
   }
 

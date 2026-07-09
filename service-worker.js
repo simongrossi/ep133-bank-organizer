@@ -1,4 +1,4 @@
-const CACHE_NAME = 'ep-bank-organizer-v4';
+const CACHE_NAME = 'ep-bank-organizer-v11';
 const APP_SHELL = [
   './',
   './index.html',
@@ -15,7 +15,10 @@ const APP_SHELL = [
   './src/padmap.js',
   './src/stats.js',
   './src/midi.js',
+  './src/device-audio.js',
+  './src/device-sync.js',
   './src/transport.js',
+  './src/device-scan.js',
   './src/utils.js'
 ];
 
